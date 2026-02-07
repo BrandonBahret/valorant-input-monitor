@@ -160,7 +160,7 @@ class ContinuousWavePlayer:
         p = pyaudio.PyAudio()
         stream = p.open(
             format=pyaudio.paFloat32,
-            channels=1,
+            channels=2,  # Changed to stereo
             rate=self.sample_rate,
             output=True
         )
@@ -170,8 +170,11 @@ class ContinuousWavePlayer:
         try:
             while self.is_playing:
                 try:
-                    data = next(waveform_generator)
-                    stream.write(data)
+                    mono_data = next(waveform_generator)
+                    # Convert mono to stereo by duplicating samples
+                    mono_samples = np.frombuffer(mono_data, dtype=np.float32)
+                    stereo_samples = np.repeat(mono_samples, 2)
+                    stream.write(stereo_samples.tobytes())
                 except StopIteration:
                     break
         finally:

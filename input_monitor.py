@@ -10,12 +10,12 @@ Tracks shooting accuracy based on movement velocity and provides audio feedback.
 import sys
 import time
 import ctypes
-from typing import List, Tuple, Deque
-from collections import deque
+from typing import List, Tuple, Optional
 from queue import Queue
 
 import pygame
 import keyboard
+import numpy as np
 
 from beeper import ContinuousWavePlayer
 
@@ -28,8 +28,8 @@ MIN_HEIGHT = 600
 FPS = 165
 
 # Gameplay Constants
-FIRE_RATE_MS = 1000 / 16
-OVERLAP_BUFFER_MS = 100  # Grace period for movement after accurate shooting starts
+FIRE_RATE_MS = 1000 / 64
+OVERLAP_BUFFER_MS = 70
 
 # Color Palette
 DARK_BG = (15, 15, 20)
@@ -45,21 +45,17 @@ GRAY = (130, 130, 130)
 # Windows API
 VK_LBUTTON = 0x01
 
-
-class Segment(list):
-    """Extended list that stores duration metadata for visualization segments."""
-    
-    def __init__(self, *args):
-        super().__init__(*args)
-        self.duration_ms = 0
-    
-    def xy_points(self) -> List[Tuple[int, int]]:
-        """Extract only x,y coordinates for drawing, ignoring timestamp."""
-        return [(p[0], p[1]) for p in self]
+# Performance constants
+MAX_BUFFER_SIZE = 2000  # Fixed buffer size
+MATH_LOG2 = 0.6931471805599453  # Pre-computed ln(2)
 
 
 class VelocitySimulator:
     """Simulates player movement velocity with acceleration and deceleration."""
+    
+    __slots__ = ('velocity', 'direction', 'accel_progress', 'max_velocity', 
+                 'accel_time', 'velocity_threshold', 'decel_half_life',
+                 '_log2_decel', '_accel_exp')
     
     def __init__(self):
         self.velocity = 0.0
@@ -68,9 +64,13 @@ class VelocitySimulator:
         
         # Physics parameters
         self.max_velocity = 1.0
-        self.accel_time = 0.475
-        self.velocity_threshold = 0.0151
-        self.decel_half_life = 0.021
+        self.accel_time = 0.480
+        self.velocity_threshold = 0.0145
+        self.decel_half_life = 0.02125
+        
+        # Pre-compute constants
+        self._log2_decel = MATH_LOG2 / self.decel_half_life
+        self._accel_exp = 1.45
     
     def update(self, dt: float, a_held: bool, d_held: bool) -> float:
         """Update velocity based on input state and return current velocity with direction."""
@@ -91,20 +91,20 @@ class VelocitySimulator:
     
     def is_moving(self) -> bool:
         """Check if velocity exceeds accuracy threshold."""
-        return abs(self.velocity) > self.velocity_threshold
+        return self.velocity > self.velocity_threshold
     
     def _apply_acceleration(self, dt: float, direction: int):
         """Accelerate in the desired direction with easing curve."""
         self.accel_progress = min(1.0, self.accel_progress + dt / self.accel_time)
-        eased_progress = self.accel_progress ** 1.5
+        eased_progress = self.accel_progress ** self._accel_exp
         self.velocity = eased_progress * self.max_velocity
         self.direction = direction
     
     def _apply_deceleration(self, dt: float):
         """Exponential decay when no input."""
-        import math
         self.accel_progress = 0.0
-        decay_factor = math.exp(-dt * math.log(2) / self.decel_half_life)
+        # Use pre-computed constant
+        decay_factor = np.exp(-dt * self._log2_decel)
         self.velocity *= decay_factor
         
         if self.velocity < 0.01:
@@ -113,10 +113,8 @@ class VelocitySimulator:
     
     def _apply_direction_change(self, dt: float, new_direction: int):
         """Handle counter-strafing when changing direction."""
-        import math
         self.accel_progress = 0.0
-        counter_strafe_half_life = self.decel_half_life
-        decay_factor = math.exp(-dt * math.log(2) / counter_strafe_half_life)
+        decay_factor = np.exp(-dt * self._log2_decel)
         self.velocity *= decay_factor
         
         if self.velocity < 0.01:
@@ -126,6 +124,9 @@ class VelocitySimulator:
 
 class ShootingTracker:
     """Tracks shooting mechanics including fire rate, accuracy, and grace periods."""
+    
+    __slots__ = ('velocity_sim', 'mouse_held', 'mouse_press_time', 'last_bullet_time',
+                 'has_inaccurate_bullet', 'movement_start_time', 'was_moving')
     
     def __init__(self, velocity_sim: VelocitySimulator):
         self.velocity_sim = velocity_sim
@@ -168,11 +169,6 @@ class ShootingTracker:
         
         self.was_moving = is_moving_now
         
-        # Check fire rate
-        time_since_last_bullet = (current_time - self.last_bullet_time) * 1000
-        if time_since_last_bullet < FIRE_RATE_MS:
-            return False
-        
         self.last_bullet_time = current_time
         
         # Determine if bullet is inaccurate
@@ -194,6 +190,47 @@ class ShootingTracker:
         return True
 
 
+class RingBuffer:
+    """Efficient ring buffer using numpy for O(1) append and fast iteration."""
+    
+    __slots__ = ('_buffer', '_head', '_size', '_capacity')
+    
+    def __init__(self, capacity: int, dtype=np.float32):
+        self._buffer = np.zeros(capacity, dtype=dtype)
+        self._head = 0
+        self._size = 0
+        self._capacity = capacity
+    
+    def append(self, value):
+        """Add value to buffer."""
+        self._buffer[self._head] = value
+        self._head = (self._head + 1) % self._capacity
+        if self._size < self._capacity:
+            self._size += 1
+    
+    def get_recent(self, count: Optional[int] = None) -> np.ndarray:
+        """Get most recent values in chronological order."""
+        if count is None:
+            count = self._size
+        else:
+            count = min(count, self._size)
+        
+        if count == 0:
+            return np.array([], dtype=self._buffer.dtype)
+        
+        start_idx = (self._head - count) % self._capacity
+        if start_idx < self._head:
+            return self._buffer[start_idx:self._head].copy()
+        else:
+            return np.concatenate([
+                self._buffer[start_idx:],
+                self._buffer[:self._head]
+            ])
+    
+    def __len__(self):
+        return self._size
+
+
 class InputMonitor:
     """Main application for visualizing keyboard and mouse inputs."""
     
@@ -202,10 +239,6 @@ class InputMonitor:
         
         self.window_width = DEFAULT_WIDTH
         self.window_height = DEFAULT_HEIGHT
-        # self.screen = pygame.display.set_mode(
-        #     (self.window_width, self.window_height),
-        #     pygame.RESIZABLE | pygame.DOUBLEBUF, vsync=1
-        # )
         self.screen = pygame.display.set_mode(
             (self.window_width, self.window_height),
             pygame.DOUBLEBUF, vsync=1
@@ -222,14 +255,14 @@ class InputMonitor:
         self.beeper_queue = Queue()
         self.beeper_active = False
         
-        # Data storage
-        self.max_points = self.window_width
-        self.time_points: Deque[float] = deque(maxlen=self.max_points)
-        self.a_points: Deque[int] = deque(maxlen=self.max_points)
-        self.d_points: Deque[int] = deque(maxlen=self.max_points)
-        self.click_points: Deque[Tuple[int, bool]] = deque(maxlen=self.max_points)
-        self.velocity_points: Deque[float] = deque(maxlen=self.max_points)
-        self.bullet_fired_points: Deque[bool] = deque(maxlen=self.max_points)
+        # Optimized data storage using numpy ring buffers
+        self.time_points = RingBuffer(MAX_BUFFER_SIZE, dtype=np.float64)
+        self.a_points = RingBuffer(MAX_BUFFER_SIZE, dtype=np.uint8)
+        self.d_points = RingBuffer(MAX_BUFFER_SIZE, dtype=np.uint8)
+        self.click_points = RingBuffer(MAX_BUFFER_SIZE, dtype=np.uint8)
+        self.click_inaccurate = RingBuffer(MAX_BUFFER_SIZE, dtype=np.uint8)
+        self.velocity_points = RingBuffer(MAX_BUFFER_SIZE, dtype=np.float32)
+        self.bullet_fired_points = RingBuffer(MAX_BUFFER_SIZE, dtype=np.uint8)
         
         # Input state
         self.a_key_held = False
@@ -242,6 +275,11 @@ class InputMonitor:
         self.current_time = 0.0
         self.last_update = time.time()
         
+        # Cached rendering resources
+        self._font_cache = {}
+        self._static_surface = None
+        self._need_static_redraw = True
+        
         self.update_fonts()
         self._setup_input_hooks()
     
@@ -253,6 +291,8 @@ class InputMonitor:
         
         self.font = pygame.font.Font(None, font_size)
         self.small_font = pygame.font.Font(None, small_font_size)
+        self._font_cache.clear()
+        self._need_static_redraw = True
     
     def get_scaled_value(self, base_value: int, dimension: str = 'height') -> int:
         """Scale a value based on current window size."""
@@ -261,21 +301,11 @@ class InputMonitor:
         return int(base_value * (self.window_width / DEFAULT_WIDTH))
     
     def handle_resize(self, new_width: int, new_height: int):
-        """Handle window resize events and update data structures."""
+        """Handle window resize events."""
         self.window_width = max(MIN_WIDTH, new_width)
         self.window_height = max(MIN_HEIGHT, new_height)
-        
-        new_max_points = self.window_width
-        if new_max_points != self.max_points:
-            self.max_points = new_max_points
-            self.time_points = deque(self.time_points, maxlen=self.max_points)
-            self.a_points = deque(self.a_points, maxlen=self.max_points)
-            self.d_points = deque(self.d_points, maxlen=self.max_points)
-            self.click_points = deque(self.click_points, maxlen=self.max_points)
-            self.velocity_points = deque(self.velocity_points, maxlen=self.max_points)
-            self.bullet_fired_points = deque(self.bullet_fired_points, maxlen=self.max_points)
-        
         self.update_fonts()
+        self._need_static_redraw = True
     
     def _setup_input_hooks(self):
         """Configure keyboard event handlers."""
@@ -347,16 +377,14 @@ class InputMonitor:
         # Process audio queue
         self._process_beeper_queue()
         
-        # Append data points
+        # Append data points - single write operation per buffer
         self.time_points.append(self.current_time)
         self.a_points.append(1 if self.a_key_held else 0)
         self.d_points.append(1 if self.d_key_held else 0)
-        self.click_points.append((
-            1 if self.shooting_tracker.mouse_held else 0,
-            self.shooting_tracker.has_inaccurate_bullet
-        ))
+        self.click_points.append(1 if self.shooting_tracker.mouse_held else 0)
+        self.click_inaccurate.append(1 if self.shooting_tracker.has_inaccurate_bullet else 0)
         self.velocity_points.append(velocity)
-        self.bullet_fired_points.append(bullet_fired_inaccurate)
+        self.bullet_fired_points.append(1 if bullet_fired_inaccurate else 0)
     
     def _process_beeper_queue(self):
         """Process queued beeper commands."""
@@ -371,57 +399,64 @@ class InputMonitor:
             except:
                 break
     
-    def _finalize_segment(self, segment: List) -> Segment:
-        """Convert list to Segment and calculate duration from timestamps."""
-        if not isinstance(segment, Segment):
-            segment = Segment(segment)
-        
-        if len(segment) >= 2:
-            t_start = segment[0][2]
-            t_end = segment[-1][2]
-            segment.duration_ms = int((t_end - t_start) * 1000)
-        else:
-            segment.duration_ms = 0
-        
-        return segment
+    def _get_cached_text(self, text: str, color: Tuple[int, int, int], font_type: str = 'normal') -> pygame.Surface:
+        """Get cached rendered text surface."""
+        key = (text, color, font_type)
+        if key not in self._font_cache:
+            font = self.font if font_type == 'normal' else self.small_font
+            self._font_cache[key] = font.render(text, True, color)
+        return self._font_cache[key]
     
     def draw_chart(self):
-        """Render the main visualization."""
+        """Render the main visualization with optimizations."""
+        # Draw static elements if needed
+        if self._need_static_redraw:
+            self._draw_static_elements()
+            self._need_static_redraw = False
+        
+        # Clear screen
         self.screen.fill(DARK_BG)
         
-        chart_height = self.get_scaled_value(500)
-        chart_y_offset = self.get_scaled_value(80)
-        grid_size = self.get_scaled_value(40)
+        # Draw static background
+        if self._static_surface:
+            self.screen.blit(self._static_surface, (0, 0))
         
-        self._draw_grid(grid_size)
-        self._draw_center_line(chart_y_offset, chart_height)
-        
+        # Draw dynamic timeline data
         if len(self.time_points) > 1:
+            chart_height = self.get_scaled_value(500)
+            chart_y_offset = self.get_scaled_value(80)
             self._draw_timeline_data(chart_y_offset, chart_height)
         
+        # Draw dynamic overlays
         self._draw_header()
         self._draw_status_bar()
     
-    def _draw_grid(self, grid_size: int):
-        """Draw subtle background grid."""
+    def _draw_static_elements(self):
+        """Pre-render static grid and reference lines."""
+        self._static_surface = pygame.Surface((self.window_width, self.window_height))
+        self._static_surface.fill(DARK_BG)
+        
+        # Draw grid
+        grid_size = self.get_scaled_value(40)
         for i in range(0, self.window_height, grid_size):
-            pygame.draw.line(self.screen, GRID_COLOR, (0, i), (self.window_width, i), 1)
+            pygame.draw.line(self._static_surface, GRID_COLOR, (0, i), (self.window_width, i), 1)
         for i in range(0, self.window_width, grid_size):
-            pygame.draw.line(self.screen, GRID_COLOR, (i, 0), (i, self.window_height), 1)
-    
-    def _draw_center_line(self, chart_y_offset: int, chart_height: int):
-        """Draw horizontal reference lines."""
+            pygame.draw.line(self._static_surface, GRID_COLOR, (i, 0), (i, self.window_height), 1)
+        
+        # Draw center lines
+        chart_height = self.get_scaled_value(500)
+        chart_y_offset = self.get_scaled_value(80)
         center_y = chart_y_offset + chart_height // 2
         baseline_offset = self.get_scaled_value(120)
         
-        pygame.draw.line(self.screen, CENTER_LINE, (0, center_y), (self.window_width, center_y), 2)
-        pygame.draw.line(self.screen, CENTER_LINE, (0, center_y - baseline_offset), 
+        pygame.draw.line(self._static_surface, CENTER_LINE, (0, center_y), (self.window_width, center_y), 2)
+        pygame.draw.line(self._static_surface, CENTER_LINE, (0, center_y - baseline_offset), 
                         (self.window_width, center_y - baseline_offset), 1)
-        pygame.draw.line(self.screen, CENTER_LINE, (0, center_y + baseline_offset), 
+        pygame.draw.line(self._static_surface, CENTER_LINE, (0, center_y + baseline_offset), 
                         (self.window_width, center_y + baseline_offset), 1)
     
     def _draw_timeline_data(self, chart_y_offset: int, chart_height: int):
-        """Draw all timeline data including keys, velocity, and clicks."""
+        """Draw all timeline data with vectorized operations."""
         time_range = 5.0
         center_y = chart_y_offset + chart_height // 2
         baseline_offset = self.get_scaled_value(120)
@@ -430,243 +465,142 @@ class InputMonitor:
         a_baseline = center_y - baseline_offset
         d_baseline = center_y + baseline_offset
         
-        # Collect visualization data
-        a_line_points, d_line_points = [], []
-        a_segments, d_segments = self._collect_key_segments(
-            time_range, a_baseline, d_baseline, wave_height,
-            a_line_points, d_line_points
-        )
-        
-        velocity_line_points = self._collect_velocity_points(time_range, center_y)
-        click_segments_normal, click_segments_timed = self._collect_click_segments(
-            time_range, center_y
-        )
-        
-        # Render layers
-        self._draw_baseline_waves(a_line_points, d_line_points)
-        self._draw_active_segments(a_segments, d_segments, a_baseline, d_baseline)
-        self._draw_velocity_line(velocity_line_points)
-        self._draw_click_segments(click_segments_normal, click_segments_timed)
-        self._draw_bullet_markers(time_range, center_y)
-    
-    def _collect_key_segments(self, time_range: float, a_baseline: int, d_baseline: int,
-                              wave_height: int, a_line_points: List, d_line_points: List
-                              ) -> Tuple[List[Segment], List[Segment]]:
-        """Collect key press segments with timestamps."""
-        a_segments, d_segments = [], []
-        current_a_segment, current_d_segment = [], []
-        prev_a_active, prev_d_active = False, False
-        
-        for i in range(len(self.time_points)):
-            time_offset = self.current_time - self.time_points[i]
-            if time_offset > time_range:
-                continue
-            
-            x = self.window_width - int(time_offset * self.window_width / time_range)
-            if x < 0:
-                continue
-            
-            # A key processing
-            a_active = self.a_points[i] > 0
-            if a_active:
-                y = a_baseline - wave_height
-                if not prev_a_active:
-                    current_a_segment.append((x, a_baseline, self.time_points[i]))
-                current_a_segment.append((x, y, self.time_points[i]))
-            else:
-                y = a_baseline
-                if prev_a_active:
-                    current_a_segment.append((x, a_baseline, self.time_points[i]))
-                    a_segments.append(self._finalize_segment(current_a_segment[:]))
-                    current_a_segment = []
-            a_line_points.append((x, y))
-            prev_a_active = a_active
-            
-            # D key processing
-            d_active = self.d_points[i] > 0
-            if d_active:
-                y = d_baseline + wave_height
-                if not prev_d_active:
-                    current_d_segment.append((x, d_baseline, self.time_points[i]))
-                current_d_segment.append((x, y, self.time_points[i]))
-            else:
-                y = d_baseline
-                if prev_d_active:
-                    current_d_segment.append((x, d_baseline, self.time_points[i]))
-                    d_segments.append(self._finalize_segment(current_d_segment[:]))
-                    current_d_segment = []
-            d_line_points.append((x, y))
-            prev_d_active = d_active
-        
-        if current_a_segment:
-            a_segments.append(self._finalize_segment(current_a_segment[:]))
-        if current_d_segment:
-            d_segments.append(self._finalize_segment(current_d_segment[:]))
-        
-        return a_segments, d_segments
-    
-    def _collect_velocity_points(self, time_range: float, center_y: int) -> List[Tuple[int, int]]:
-        """Collect velocity visualization points."""
-        velocity_line_points = []
-        velocity_scale = self.get_scaled_value(100)
-        
-        for i in range(len(self.time_points)):
-            time_offset = self.current_time - self.time_points[i]
-            if time_offset > time_range:
-                continue
-            
-            x = self.window_width - int(time_offset * self.window_width / time_range)
-            if x < 0:
-                continue
-            
-            vel = self.velocity_points[i]
-            y = center_y - int(vel * velocity_scale)
-            velocity_line_points.append((x, y))
-        
-        return velocity_line_points
-    
-    def _collect_click_segments(self, time_range: float, center_y: int
-                                ) -> Tuple[List[List], List[List]]:
-        """Collect click segments, separating normal and inaccurate clicks."""
-        click_segments_normal, click_segments_timed = [], []
-        current_segment = []
-        current_is_timed = False
-        
-        for i in range(len(self.time_points)):
-            time_offset = self.current_time - self.time_points[i]
-            if time_offset > time_range:
-                continue
-            
-            x = self.window_width - int(time_offset * self.window_width / time_range)
-            if x < 0:
-                continue
-            
-            click_value, click_has_bad_bullet = self.click_points[i]
-            click_active = click_value > 0
-            
-            if click_active:
-                if not current_segment or click_has_bad_bullet != current_is_timed:
-                    if current_segment:
-                        target = click_segments_timed if current_is_timed else click_segments_normal
-                        target.append(current_segment[:])
-                    current_segment = [(x, center_y)]
-                    current_is_timed = click_has_bad_bullet
-                else:
-                    current_segment.append((x, center_y))
-            else:
-                if current_segment:
-                    target = click_segments_timed if current_is_timed else click_segments_normal
-                    target.append(current_segment[:])
-                    current_segment = []
-        
-        if current_segment:
-            target = click_segments_timed if current_is_timed else click_segments_normal
-            target.append(current_segment)
-        
-        return click_segments_normal, click_segments_timed
-    
-    def _draw_baseline_waves(self, a_line_points: List, d_line_points: List):
-        """Draw dimmed baseline waves for key states."""
-        if len(a_line_points) > 1:
-            pygame.draw.lines(self.screen, (40, 80, 120), False, a_line_points, 1)
-        if len(d_line_points) > 1:
-            pygame.draw.lines(self.screen, (120, 40, 40), False, d_line_points, 1)
-    
-    def _draw_active_segments(self, a_segments: List[Segment], d_segments: List[Segment],
-                             a_baseline: int, d_baseline: int):
-        """Draw active key press segments with duration labels."""
-        label_offset = self.get_scaled_value(105)
-        a_label_y = a_baseline - label_offset
-        d_label_y = d_baseline + label_offset
-        
-        for segment in a_segments:
-            if len(segment) > 1:
-                pygame.draw.lines(self.screen, BLUE, False, segment.xy_points(), 3)
-                self._draw_segment_duration(segment, a_label_y, GRAY)
-        
-        for segment in d_segments:
-            if len(segment) > 1:
-                pygame.draw.lines(self.screen, RED, False, segment.xy_points(), 3)
-                self._draw_segment_duration(segment, d_label_y, GRAY)
-    
-    def _draw_segment_duration(self, segment: Segment, label_y: int, color: Tuple[int, int, int]):
-        """Draw duration label for a segment."""
-        if len(segment) < 2 or not hasattr(segment, "duration_ms"):
+        # Get recent data as numpy arrays
+        times = self.time_points.get_recent()
+        if len(times) == 0:
             return
         
-        x_start = segment[0][0]
-        label = self.small_font.render(f"{segment.duration_ms} ms", True, color)
-        text_x = x_start
-        text_y = label_y - label.get_height() // 2
+        # Vectorized time offset calculation
+        time_offsets = self.current_time - times
+        valid_mask = time_offsets <= time_range
         
-        if 0 <= text_x <= self.window_width - label.get_width():
-            self.screen.blit(label, (text_x, text_y))
+        if not np.any(valid_mask):
+            return
+        
+        # Filter arrays
+        times = times[valid_mask]
+        time_offsets = time_offsets[valid_mask]
+        a_states = self.a_points.get_recent(len(self.time_points))[valid_mask]
+        d_states = self.d_points.get_recent(len(self.time_points))[valid_mask]
+        velocities = self.velocity_points.get_recent(len(self.time_points))[valid_mask]
+        click_states = self.click_points.get_recent(len(self.time_points))[valid_mask]
+        click_bad = self.click_inaccurate.get_recent(len(self.time_points))[valid_mask]
+        bullet_fired = self.bullet_fired_points.get_recent(len(self.time_points))[valid_mask]
+        
+        # Vectorized x coordinate calculation
+        x_coords = self.window_width - (time_offsets * self.window_width / time_range).astype(np.int32)
+        
+        # Draw A key line (vectorized)
+        a_y = np.where(a_states > 0, a_baseline - wave_height, a_baseline)
+        a_points = np.column_stack([x_coords, a_y])
+        if len(a_points) > 1:
+            pygame.draw.lines(self.screen, (40, 80, 120), False, a_points.tolist(), 1)
+        
+        # Draw D key line (vectorized)
+        d_y = np.where(d_states > 0, d_baseline + wave_height, d_baseline)
+        d_points = np.column_stack([x_coords, d_y])
+        if len(d_points) > 1:
+            pygame.draw.lines(self.screen, (120, 40, 40), False, d_points.tolist(), 1)
+        
+        # Draw active segments for A and D
+        self._draw_key_segments_fast(x_coords, times, a_states, a_y, BLUE, a_baseline - self.get_scaled_value(105))
+        self._draw_key_segments_fast(x_coords, times, d_states, d_y, RED, d_baseline + self.get_scaled_value(105))
+        
+        # Draw velocity line (vectorized)
+        velocity_scale = self.get_scaled_value(100)
+        vel_y = center_y - (velocities * velocity_scale).astype(np.int32)
+        vel_points = np.column_stack([x_coords, vel_y])
+        if len(vel_points) > 1:
+            pygame.draw.lines(self.screen, YELLOW, False, vel_points.tolist(), 2)
+        
+        # Draw click segments
+        self._draw_click_segments_fast(x_coords, click_states, click_bad, center_y)
+        
+        # Draw bullet markers
+        bullet_mask = bullet_fired > 0
+        if np.any(bullet_mask):
+            tick_height = self.get_scaled_value(15)
+            bullet_x = x_coords[bullet_mask]
+            for x in bullet_x:
+                pygame.draw.line(self.screen, RED, 
+                               (int(x), center_y - tick_height), 
+                               (int(x), center_y + tick_height), 3)
     
-    def _draw_velocity_line(self, velocity_line_points: List[Tuple[int, int]]):
-        """Draw velocity visualization line."""
-        if len(velocity_line_points) > 1:
-            pygame.draw.lines(self.screen, YELLOW, False, velocity_line_points, 2)
+    def _draw_key_segments_fast(self, x_coords: np.ndarray, times: np.ndarray, 
+                                states: np.ndarray, y_coords: np.ndarray,
+                                color: Tuple[int, int, int], label_y: int):
+        """Fast segment drawing using vectorized operations."""
+        # Find state transitions
+        state_changes = np.diff(states, prepend=0)
+        starts = np.where(state_changes == 1)[0]
+        ends = np.where(state_changes == -1)[0]
+        
+        # Handle edge cases
+        if len(starts) == 0:
+            return
+        
+        if len(ends) == 0 or (len(starts) > 0 and starts[-1] > ends[-1]):
+            ends = np.append(ends, len(states) - 1)
+        
+        # Draw segments
+        for start_idx, end_idx in zip(starts, ends):
+            if end_idx > start_idx:
+                segment_x = x_coords[start_idx:end_idx + 1]
+                segment_y = y_coords[start_idx:end_idx + 1]
+                points = np.column_stack([segment_x, segment_y])
+                
+                if len(points) > 1:
+                    pygame.draw.lines(self.screen, color, False, points.tolist(), 3)
+                    
+                    # Draw duration label
+                    duration_ms = int((times[end_idx] - times[start_idx]) * 1000)
+                    label = self._get_cached_text(f"{duration_ms} ms", GRAY, 'small')
+                    text_x = int(segment_x[0])
+                    text_y = label_y - label.get_height() // 2
+                    
+                    if 0 <= text_x <= self.window_width - label.get_width():
+                        self.screen.blit(label, (text_x, text_y))
     
-    def _draw_click_segments(self, click_segments_normal: List, click_segments_timed: List):
-        """Draw click segments with appropriate styling."""
+    def _draw_click_segments_fast(self, x_coords: np.ndarray, click_states: np.ndarray,
+                                  click_bad: np.ndarray, center_y: int):
+        """Fast click segment drawing."""
+        # Find click transitions
+        click_changes = np.diff(click_states, prepend=0)
+        starts = np.where(click_changes == 1)[0]
+        ends = np.where(click_changes == -1)[0]
+        
+        if len(starts) == 0:
+            return
+        
+        if len(ends) == 0 or (len(starts) > 0 and starts[-1] > ends[-1]):
+            ends = np.append(ends, len(click_states) - 1)
+        
         dot_radius = max(4, self.get_scaled_value(6))
         
-        # Normal clicks
-        for segment in click_segments_normal:
-            if len(segment) > 1:
-                pygame.draw.lines(self.screen, WHITE, False, segment, 2)
-            if segment:
-                pygame.draw.circle(self.screen, WHITE, segment[0], dot_radius, 0)
-                if len(segment) > 1:
-                    pygame.draw.circle(self.screen, WHITE, segment[-1], dot_radius, 0)
-        
-        # Inaccurate clicks with green overlay
-        for segment in click_segments_timed:
-            if len(segment) > 1:
-                pygame.draw.lines(self.screen, GREEN, False, segment, 4)
-                pygame.draw.lines(self.screen, WHITE, False, segment, 2)
-            if segment:
-                pygame.draw.circle(self.screen, WHITE, segment[0], dot_radius, 0)
-                if len(segment) > 1:
-                    pygame.draw.circle(self.screen, WHITE, segment[-1], dot_radius, 0)
-    
-    def _draw_bullet_markers(self, time_range: float, center_y: int):
-        """Draw markers for inaccurate bullet fires with velocity values."""
-        last_text_x = None
-        text_x_threshold = self.get_scaled_value(100)
-        tick_height = self.get_scaled_value(15)
-        
-        for i in range(len(self.time_points)):
-            time_offset = self.current_time - self.time_points[i]
-            if time_offset > time_range:
-                continue
-            
-            x = self.window_width - int(time_offset * self.window_width / time_range)
-            if x < 0:
-                continue
-            
-            if self.bullet_fired_points[i]:
-                pygame.draw.line(self.screen, RED, 
-                               (x, center_y - tick_height), 
-                               (x, center_y + tick_height), 3)
+        for start_idx, end_idx in zip(starts, ends):
+            if end_idx >= start_idx:
+                is_bad = click_bad[start_idx] > 0
+                segment_x = x_coords[start_idx:end_idx + 1]
+                segment_y = np.full(len(segment_x), center_y)
+                points = np.column_stack([segment_x, segment_y]).tolist()
                 
-                # vel = abs(self.velocity_points[i])
-                # vel_text = f"{vel:.3f}"
-                # vel_label = self.small_font.render(vel_text, True, GRAYf)
+                if len(points) > 1:
+                    if is_bad:
+                        pygame.draw.lines(self.screen, GREEN, False, points, 4)
+                    pygame.draw.lines(self.screen, WHITE, False, points, 2)
                 
-                # text_x = x - vel_label.get_width() // 2
-                # text_y = center_y + self.get_scaled_value(25)
-                
-                # if last_text_x is None or abs(text_x - last_text_x) >= text_x_threshold:
-                #     self.screen.blit(vel_label, (text_x, text_y))
-                #     last_text_x = text_x
+                # Draw dots
+                if points:
+                    pygame.draw.circle(self.screen, WHITE, (int(points[0][0]), int(points[0][1])), dot_radius, 0)
+                    if len(points) > 1:
+                        pygame.draw.circle(self.screen, WHITE, (int(points[-1][0]), int(points[-1][1])), dot_radius, 0)
     
     def _draw_header(self):
-        """Draw application header with legend."""
+        """Draw application header with legend using cached text."""
         header_padding = self.get_scaled_value(20)
         header_y = self.get_scaled_value(15)
         
-        title = self.font.render("INPUT MONITOR", True, WHITE)
+        title = self._get_cached_text("INPUT MONITOR", WHITE)
         self.screen.blit(title, (header_padding, header_y))
         
         legend_spacing = self.get_scaled_value(100)
@@ -680,21 +614,21 @@ class InputMonitor:
         ]
         
         for i, (text, color) in enumerate(labels):
-            label = self.font.render(text, True, color)
+            label = self._get_cached_text(text, color)
             offset = legend_spacing * (i if i < 2 else i + 0.9 if i == 3 else i)
             self.screen.blit(label, (legend_x + offset, header_y))
     
     def _draw_status_bar(self):
-        """Draw status bar with pause state and controls."""
+        """Draw status bar with pause state."""
         header_padding = self.get_scaled_value(20)
         bottom_y = self.window_height - self.get_scaled_value(35)
         
         status = "PAUSED" if self.paused else "RECORDING"
         status_color = RED if self.paused else GREEN
-        status_text = self.font.render(status, True, status_color)
+        status_text = self._get_cached_text(status, status_color)
         self.screen.blit(status_text, (header_padding, bottom_y))
         
-        help_text = self.font.render("TAB: Pause/Resume", True, CENTER_LINE)
+        help_text = self._get_cached_text("TAB: Pause/Resume", CENTER_LINE)
         help_x = self.window_width - self.get_scaled_value(220)
         self.screen.blit(help_text, (help_x, bottom_y))
     
