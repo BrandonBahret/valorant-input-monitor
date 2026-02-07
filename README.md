@@ -15,7 +15,7 @@ A real-time input monitoring application that visualizes keyboard (A/D keys) and
 
 ## Binaries
 
-[Download: windows executable](https://github.com/BrandonBahret/valorant-input-monitor/blob/main/dist/InputMonitor.exe)
+[Download: windows executable](https://github.com/BrandonBahret/valorant-input-monitor/raw/refs/heads/main/dist/InputMonitor.exe)
 
 ## Installation
 
