@@ -13,6 +13,10 @@ A real-time input monitoring application that visualizes keyboard (A/D keys) and
 - **Pause/Unpause**: Press TAB to pause or resume the chart
 - **Real-time Scrolling**: Chart scrolls from right to left showing the last 5 seconds
 
+## Binaries
+
+[Download: windows executable](https://github.com/BrandonBahret/valorant-input-monitor/blob/main/dist/InputMonitor.exe)
+
 ## Installation
 
 1. Install the required dependencies:
