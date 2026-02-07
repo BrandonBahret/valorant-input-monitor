@@ -1,6 +1,8 @@
 # Input Monitor
 
-A real-time input monitoring application that visualizes keyboard (A/D keys) and mouse clicks in an scrolling chart.
+A real-time input monitoring application that visualizes keyboard (A/D keys) and mouse clicks in a scrolling chart.
+
+![Preview image of the application](https://github.com/BrandonBahret/valorant-input-monitor/blob/main/input_monitor_graph.png "Preview")
 
 ## Features
 
@@ -24,7 +26,3 @@ Run the application:
 ```bash
 python input_monitor.py
 ```
-
-### Controls
-
-- **TAB**: Pause/unpause the chart
