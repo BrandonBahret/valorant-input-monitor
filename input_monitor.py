@@ -7,6 +7,7 @@ Displays A/D key presses, mouse clicks, and simulated velocity on a scrolling ti
 Tracks shooting accuracy based on movement velocity and provides audio feedback.
 """
 
+import json
 import sys
 import time
 import ctypes
@@ -52,6 +53,16 @@ GREEN = (100, 255, 150)
 YELLOW = (255, 220, 80)
 GRAY = (130, 130, 130)
 
+DEFAULT_CONFIG = {
+    "keys": {
+        "left": "a",
+        "right": "d",
+        "walk": "shift",
+        "crouch": "ctrl",
+        "pause": "tab"
+    }
+}
+
 # Windows API
 VK_LBUTTON = 0x01
 
@@ -60,30 +71,65 @@ MAX_BUFFER_SIZE = 1750  # Fixed buffer size
 MATH_LOG2 = 0.6931471805599453  # Pre-computed ln(2)
 
 
+def load_config() -> dict:
+    config_path: Path = resource_path("config.json")
+
+    if not config_path.exists():
+        return DEFAULT_CONFIG
+
+    try:
+        with config_path.open("r", encoding="utf-8") as f:
+            user_cfg = json.load(f)
+    except Exception as e:
+        print(f"[Config] Failed to load config.json, using defaults: {e}")
+        return DEFAULT_CONFIG
+
+    # Merge user keys over defaults
+    merged = DEFAULT_CONFIG.copy()
+    merged["keys"] = {
+        **DEFAULT_CONFIG["keys"],
+        **user_cfg.get("keys", {})
+    }
+    return merged
+
+
 class VelocitySimulator:
     """Simulates player movement velocity with acceleration and deceleration."""
     
     __slots__ = ('velocity', 'direction', 'accel_progress', 'max_velocity', 
                  'accel_time', 'velocity_threshold', 'decel_half_life',
-                 '_log2_decel', '_accel_exp')
+                 '_log2_decel', '_accel_exp', 'base_max_velocity', 'base_accel_time',
+                 'walk_velocity_multiplier', 'walk_accel_multiplier', 'is_walking')
     
     def __init__(self):
         self.velocity = 0.0
         self.direction = 0
         self.accel_progress = 0.0
         
-        # Physics parameters
-        self.max_velocity = 1.0
-        self.accel_time = 0.480
+        # Base physics parameters (normal movement)
+        self.base_max_velocity = 1.0
+        self.base_accel_time = 0.480
         self.velocity_threshold = 0.0148
         self.decel_half_life = 0.02125
+        
+        # Slow walk parameters
+        self.walk_velocity_multiplier = 0.52  # Slow walk is 34% of max speed
+        self.walk_accel_multiplier = 1.00     # Takes X longer to accelerate when walking
+        
+        # Current physics parameters (adjusted based on walk state)
+        self.max_velocity = self.base_max_velocity
+        self.accel_time = self.base_accel_time
+        self.is_walking = False
         
         # Pre-compute constants
         self._log2_decel = MATH_LOG2 / self.decel_half_life
         self._accel_exp = 1.45
     
-    def update(self, dt: float, a_held: bool, d_held: bool) -> float:
+    def update(self, dt: float, a_held: bool, d_held: bool, shift_held: bool = False) -> float:
         """Update velocity based on input state and return current velocity with direction."""
+        # Update walk state and physics parameters
+        self._update_walk_state(shift_held)
+        
         desired_direction = 0
         if a_held and not d_held:
             desired_direction = -1
@@ -99,9 +145,46 @@ class VelocitySimulator:
         
         return self.velocity * self.direction
     
+    def _update_walk_state(self, shift_held: bool):
+        """Update physics parameters based on walk state."""
+        was_walking = self.is_walking
+        self.is_walking = shift_held
+        
+        if self.is_walking:
+            self.max_velocity = self.base_max_velocity * self.walk_velocity_multiplier
+            self.accel_time = self.base_accel_time * self.walk_accel_multiplier
+        else:
+            self.max_velocity = self.base_max_velocity
+            self.accel_time = self.base_accel_time
+        
+        # If we switched from walk to run or vice versa while moving, adjust progress
+        if was_walking != self.is_walking and self.accel_progress > 0:
+            # Scale the acceleration progress to maintain relative position in curve
+            if self.is_walking:
+                # Switched to walk: we're further along in the slower curve
+                # Velocity stays the same, but we're at a higher percentage of the walk max
+                # So we need to find what progress gives us current velocity
+                if self.max_velocity > 0:
+                    eased_velocity_ratio = self.velocity / self.max_velocity
+                    # Reverse the easing function: progress = (velocity_ratio) ^ (1/exponent)
+                    self.accel_progress = min(1.0, eased_velocity_ratio ** (1.0 / self._accel_exp))
+            else:
+                # Switched to run: same logic but now max velocity is higher
+                if self.max_velocity > 0:
+                    eased_velocity_ratio = self.velocity / self.max_velocity
+                    self.accel_progress = min(1.0, eased_velocity_ratio ** (1.0 / self._accel_exp))
+    
     def is_moving(self) -> bool:
         """Check if velocity exceeds accuracy threshold."""
         return self.velocity > self.velocity_threshold
+    
+    def is_near_max_velocity(self) -> bool:
+        """Check if velocity is approaching maximum (above 75%)."""
+        return self.velocity > 0.75 * self.max_velocity
+    
+    def get_velocity_ratio(self) -> float:
+        """Get current velocity as ratio of max velocity (0.0 to 1.0)."""
+        return self.velocity / self.max_velocity if self.max_velocity > 0 else 0.0
     
     def _apply_acceleration(self, dt: float, direction: int):
         """Accelerate in the desired direction with easing curve."""
@@ -265,8 +348,8 @@ class InputMonitor:
         self.velocity_sim = VelocitySimulator()
         self.shooting_tracker = ShootingTracker(self.velocity_sim)
         
-        # Audio feedback
-        self.beeper = ContinuousWavePlayer()
+        # Audio feedback - separate beepers for different purposes
+        self.inaccuracy_beeper = ContinuousWavePlayer()
         self.beeper_queue = Queue()
         self.beeper_active = False
         
@@ -274,14 +357,18 @@ class InputMonitor:
         self.time_points = RingBuffer(MAX_BUFFER_SIZE, dtype=np.float64)
         self.a_points = RingBuffer(MAX_BUFFER_SIZE, dtype=np.uint8)
         self.d_points = RingBuffer(MAX_BUFFER_SIZE, dtype=np.uint8)
+        self.shift_points = RingBuffer(MAX_BUFFER_SIZE, dtype=np.uint8)
         self.click_points = RingBuffer(MAX_BUFFER_SIZE, dtype=np.uint8)
         self.click_inaccurate = RingBuffer(MAX_BUFFER_SIZE, dtype=np.uint8)
         self.velocity_points = RingBuffer(MAX_BUFFER_SIZE, dtype=np.float32)
         self.bullet_fired_points = RingBuffer(MAX_BUFFER_SIZE, dtype=np.uint8)
         
         # Input state
+        self.config = load_config()
         self.a_key_held = False
         self.d_key_held = False
+        self.shift_key_held = False
+        self.ctrl_key_held = False
         self.prev_mouse_held = False
         
         # Application state
@@ -324,25 +411,40 @@ class InputMonitor:
     
     def _setup_input_hooks(self):
         """Configure keyboard event handlers."""
-        keyboard.on_press_key('a', lambda _: self._on_key_press('a'), suppress=False)
-        keyboard.on_release_key('a', lambda _: self._on_key_release('a'), suppress=False)
-        keyboard.on_press_key('d', lambda _: self._on_key_press('d'), suppress=False)
-        keyboard.on_release_key('d', lambda _: self._on_key_release('d'), suppress=False)
-        keyboard.on_press_key('tab', lambda _: self._toggle_pause(), suppress=False)
+        keys = self.config['keys']
+        keyboard.on_press_key(keys['left'], lambda _: self._on_key_press(keys['left']), suppress=False)
+        keyboard.on_release_key(keys['left'], lambda _: self._on_key_release(keys['left']), suppress=False)
+        keyboard.on_press_key(keys['right'], lambda _: self._on_key_press(keys['right']), suppress=False)
+        keyboard.on_release_key(keys['right'], lambda _: self._on_key_release(keys['right']), suppress=False)
+        keyboard.on_press_key(keys['walk'], lambda _: self._on_key_press(keys['walk']), suppress=False)
+        keyboard.on_release_key(keys['walk'], lambda _: self._on_key_release(keys['walk']), suppress=False)
+        keyboard.on_press_key(keys['crouch'], lambda _: self._on_key_press(keys['crouch']), suppress=False)
+        keyboard.on_release_key(keys['crouch'], lambda _: self._on_key_release(keys['crouch']), suppress=False)
+        keyboard.on_press_key(keys['pause'], lambda _: self._toggle_pause(), suppress=False)
     
     def _on_key_press(self, key: str):
         """Handle key press events."""
-        if key == 'a':
+        keys = self.config['keys']
+        if key == keys['left']:
             self.a_key_held = True
-        elif key == 'd':
+        elif key == keys['right']:
             self.d_key_held = True
+        elif key == keys['walk']:
+            self.shift_key_held = True
+        elif key == keys['crouch']:
+            self.ctrl_key_held = True
     
     def _on_key_release(self, key: str):
         """Handle key release events."""
-        if key == 'a':
+        keys = self.config['keys']
+        if key == keys['left']:
             self.a_key_held = False
-        elif key == 'd':
+        elif key == keys['right']:
             self.d_key_held = False
+        elif key == keys['walk']:
+            self.shift_key_held = False
+        elif key == keys['crouch']:
+            self.ctrl_key_held = False
     
     def _toggle_pause(self):
         """Toggle pause state."""
@@ -359,7 +461,7 @@ class InputMonitor:
         elif not current_mouse_held and self.prev_mouse_held:
             self.shooting_tracker.on_mouse_release()
         
-        # Manage audio feedback
+        # Manage inaccuracy audio feedback
         if self.beeper_active and (not self.velocity_sim.is_moving() or not current_mouse_held):
             self.beeper_queue.put('stop')
             self.beeper_active = False
@@ -379,7 +481,7 @@ class InputMonitor:
         self.current_time += dt
         
         # Update physics
-        velocity = self.velocity_sim.update(dt, self.a_key_held, self.d_key_held)
+        velocity = self.velocity_sim.update(dt, self.a_key_held, self.d_key_held, self.shift_key_held or self.ctrl_key_held)
         
         # Check for bullet fire
         bullet_fired_inaccurate = self.shooting_tracker.check_bullet_fire(current_real_time)
@@ -389,28 +491,29 @@ class InputMonitor:
             self.beeper_queue.put('start')
             self.beeper_active = True
         
-        # Process audio queue
+        # Process audio queues
         self._process_beeper_queue()
         
         # Append data points - single write operation per buffer
         self.time_points.append(self.current_time)
         self.a_points.append(1 if self.a_key_held else 0)
         self.d_points.append(1 if self.d_key_held else 0)
+        self.shift_points.append(1 if self.shift_key_held or self.ctrl_key_held else 0)
         self.click_points.append(1 if self.shooting_tracker.mouse_held else 0)
         self.click_inaccurate.append(1 if self.shooting_tracker.has_inaccurate_bullet else 0)
         self.velocity_points.append(velocity)
         self.bullet_fired_points.append(1 if bullet_fired_inaccurate else 0)
     
     def _process_beeper_queue(self):
-        """Process queued beeper commands."""
-        self.beeper.update()
+        """Process queued beeper commands for inaccuracy feedback."""
+        self.inaccuracy_beeper.update()
         while not self.beeper_queue.empty():
             try:
                 cmd = self.beeper_queue.get_nowait()
                 if cmd == 'start':
-                    self.beeper.start()
+                    self.inaccuracy_beeper.start()
                 elif cmd == 'stop':
-                    self.beeper.stop()
+                    self.inaccuracy_beeper.stop()
             except:
                 break
     
@@ -458,13 +561,16 @@ class InputMonitor:
         for i in range(0, self.window_width, grid_size):
             pygame.draw.line(self._static_surface, GRID_COLOR, (i, 0), (i, self.window_height), 1)
         
-        # Draw center lines
+        # Draw center lines and velocity reference lines
         chart_height = self.get_scaled_value(500)
         chart_y_offset = self.get_scaled_value(80)
         center_y = chart_y_offset + chart_height // 2
         baseline_offset = self.get_scaled_value(120)
         
+        # Center line (zero velocity)
         pygame.draw.line(self._static_surface, CENTER_LINE, (0, center_y), (self.window_width, center_y), 2)
+        
+        # A and D baselines
         pygame.draw.line(self._static_surface, CENTER_LINE, (0, center_y - baseline_offset), 
                         (self.window_width, center_y - baseline_offset), 1)
         pygame.draw.line(self._static_surface, CENTER_LINE, (0, center_y + baseline_offset), 
@@ -497,6 +603,7 @@ class InputMonitor:
         time_offsets = time_offsets[valid_mask]
         a_states = self.a_points.get_recent(len(self.time_points))[valid_mask]
         d_states = self.d_points.get_recent(len(self.time_points))[valid_mask]
+        shift_states = self.shift_points.get_recent(len(self.time_points))[valid_mask]
         velocities = self.velocity_points.get_recent(len(self.time_points))[valid_mask]
         click_states = self.click_points.get_recent(len(self.time_points))[valid_mask]
         click_bad = self.click_inaccurate.get_recent(len(self.time_points))[valid_mask]
@@ -504,6 +611,9 @@ class InputMonitor:
         
         # Vectorized x coordinate calculation
         x_coords = self.window_width - (time_offsets * self.window_width / time_range).astype(np.int32)
+        
+        # Draw shift key state as background highlight
+        self._draw_shift_background(x_coords, shift_states, center_y, chart_height)
         
         # Draw A key line (vectorized)
         a_y = np.where(a_states > 0, a_baseline - wave_height, a_baseline)
@@ -521,12 +631,13 @@ class InputMonitor:
         self._draw_key_segments_fast(x_coords, times, a_states, a_y, BLUE, a_baseline - self.get_scaled_value(105))
         self._draw_key_segments_fast(x_coords, times, d_states, d_y, RED, d_baseline + self.get_scaled_value(105))
         
-        # Draw velocity line (vectorized)
+        # Draw velocity line (vectorized) - use different color when walking
         velocity_scale = self.get_scaled_value(100)
         vel_y = center_y - (velocities * velocity_scale).astype(np.int32)
         vel_points = np.column_stack([x_coords, vel_y])
         if len(vel_points) > 1:
-            pygame.draw.lines(self.screen, YELLOW, False, vel_points.tolist(), 2)
+            # Draw walking segments in a different shade
+            self._draw_velocity_line_with_walk(x_coords, vel_y, shift_states)
         
         # Draw click segments
         self._draw_click_segments_fast(x_coords, click_states, click_bad, center_y)
@@ -540,6 +651,63 @@ class InputMonitor:
                 pygame.draw.line(self.screen, RED, 
                                (int(x), center_y - tick_height), 
                                (int(x), center_y + tick_height), 3)
+    
+    def _draw_shift_background(self, x_coords: np.ndarray, shift_states: np.ndarray, 
+                               center_y: int, chart_height: int):
+        """Draw subtle background highlight when shift is held."""
+        # Find shift state transitions
+        shift_changes = np.diff(shift_states, prepend=0)
+        starts = np.where(shift_changes == 1)[0]
+        ends = np.where(shift_changes == -1)[0]
+        
+        if len(starts) == 0:
+            return
+        
+        if len(ends) == 0 or (len(starts) > 0 and starts[-1] > ends[-1]):
+            ends = np.append(ends, len(shift_states) - 1)
+        
+        # Draw semi-transparent rectangles for shift periods
+        highlight_color = (30, 50, 80, 60)  # Blue tint with alpha
+        surface = pygame.Surface((self.window_width, chart_height // 2), pygame.SRCALPHA)
+        
+        for start_idx, end_idx in zip(starts, ends):
+            if end_idx >= start_idx:
+                x1 = int(x_coords[end_idx])  # Rightmost (earlier in time)
+                x2 = int(x_coords[start_idx])  # Leftmost (later in time)
+                width = x2 - x1
+                if width > 0:
+                    rect = pygame.Rect(x1, 0, width, chart_height // 2)
+                    pygame.draw.rect(surface, highlight_color, rect)
+        
+        # Blit to screen centered on velocity area
+        self.screen.blit(surface, (0, center_y - chart_height // 4))
+    
+    def _draw_velocity_line_with_walk(self, x_coords: np.ndarray, vel_y: np.ndarray, 
+                                      shift_states: np.ndarray):
+        """Draw velocity line with different colors for walking vs running."""
+        # Find segments where shift is held vs not held
+        shift_changes = np.diff(shift_states, prepend=0)
+        
+        # Draw as continuous line but with color changes
+        points = np.column_stack([x_coords, vel_y])
+        
+        # For simplicity, draw the whole line in yellow, then overdraw walking segments
+        if len(points) > 1:
+            pygame.draw.lines(self.screen, YELLOW, False, points.tolist(), 2)
+            
+            # Find walking segments and overdraw in cyan
+            starts = np.where(shift_changes == 1)[0]
+            ends = np.where(shift_changes == -1)[0]
+            
+            if len(starts) > 0:
+                if len(ends) == 0 or (len(starts) > 0 and starts[-1] > ends[-1]):
+                    ends = np.append(ends, len(shift_states) - 1)
+                
+                for start_idx, end_idx in zip(starts, ends):
+                    if end_idx > start_idx:
+                        segment = points[start_idx:end_idx + 1]
+                        if len(segment) > 1:
+                            pygame.draw.lines(self.screen, (100, 200, 255), False, segment.tolist(), 2)
     
     def _draw_key_segments_fast(self, x_coords: np.ndarray, times: np.ndarray, 
                                 states: np.ndarray, y_coords: np.ndarray,
@@ -634,7 +802,7 @@ class InputMonitor:
             self.screen.blit(label, (legend_x + offset, header_y))
     
     def _draw_status_bar(self):
-        """Draw status bar with pause state."""
+        """Draw status bar with pause state, velocity indicator, and walk mode."""
         header_padding = self.get_scaled_value(20)
         bottom_y = self.window_height - self.get_scaled_value(35)
         
@@ -643,8 +811,17 @@ class InputMonitor:
         status_text = self._get_cached_text(status, status_color)
         self.screen.blit(status_text, (header_padding, bottom_y))
         
-        help_text = self._get_cached_text("TAB: Pause/Resume", CENTER_LINE)
-        help_x = self.window_width - self.get_scaled_value(220)
+        current_x = header_padding + status_text.get_width() + self.get_scaled_value(30)
+        
+        # Show walk mode indicator
+        if self.velocity_sim.is_walking:
+            walk_text = self._get_cached_text("WALKING", BLUE)
+            self.screen.blit(walk_text, (current_x, bottom_y))
+            current_x += walk_text.get_width() + self.get_scaled_value(20)
+        
+        keys = self.config['keys']
+        help_text = self._get_cached_text(f"{str(keys['pause']).upper()}: Pause/Resume  |  SHIFT: Walk", CENTER_LINE)
+        help_x = self.window_width - self.get_scaled_value(350)
         self.screen.blit(help_text, (help_x, bottom_y))
     
     def run(self):
@@ -668,9 +845,10 @@ class InputMonitor:
         """Clean up resources on exit."""
         if self.beeper_active:
             try:
-                self.beeper.stop()
+                self.inaccuracy_beeper.stop()
             except:
                 pass
+
         keyboard.unhook_all()
         pygame.quit()
         sys.exit()

@@ -1,0 +1,9 @@
+{
+  "keys": {
+    "left": "a",
+    "right": "d",
+    "walk": "shift",
+    "crouch": "ctrl",
+    "pause": "tab"
+  }
+}
