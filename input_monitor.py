@@ -25,10 +25,9 @@ DEFAULT_WIDTH = 1400
 DEFAULT_HEIGHT = 700
 MIN_WIDTH = 800
 MIN_HEIGHT = 600
-FPS = 165
 
 # Gameplay Constants
-FIRE_RATE_MS = 1000 / 64
+FIRE_RATE_MS = 1000 / 16
 OVERLAP_BUFFER_MS = 70
 
 # Color Palette
@@ -46,7 +45,7 @@ GRAY = (130, 130, 130)
 VK_LBUTTON = 0x01
 
 # Performance constants
-MAX_BUFFER_SIZE = 2000  # Fixed buffer size
+MAX_BUFFER_SIZE = 1750  # Fixed buffer size
 MATH_LOG2 = 0.6931471805599453  # Pre-computed ln(2)
 
 
@@ -65,7 +64,7 @@ class VelocitySimulator:
         # Physics parameters
         self.max_velocity = 1.0
         self.accel_time = 0.480
-        self.velocity_threshold = 0.0145
+        self.velocity_threshold = 0.0148
         self.decel_half_life = 0.02125
         
         # Pre-compute constants
@@ -241,8 +240,9 @@ class InputMonitor:
         self.window_height = DEFAULT_HEIGHT
         self.screen = pygame.display.set_mode(
             (self.window_width, self.window_height),
-            pygame.DOUBLEBUF, vsync=1
-        )
+            pygame.DOUBLEBUF | pygame.SCALED,
+            vsync=1
+        )      
         pygame.display.set_caption("Input Monitor")
         self.clock = pygame.time.Clock()
         
@@ -645,7 +645,7 @@ class InputMonitor:
                 self.update_data()
                 self.draw_chart()
                 pygame.display.flip()
-                self.clock.tick(FPS)
+                self.clock.tick()
         finally:
             self._cleanup()
     

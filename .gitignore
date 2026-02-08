@@ -1,4 +1,5 @@
 __pycache__/
 env/
-build/
-*.spec
+input_monitor.build/
+input_monitor.dist/
+input_monitor.onefile-build/
