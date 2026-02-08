@@ -30,3 +30,30 @@ Run the application:
 ```bash
 python input_monitor.py
 ```
+
+## Configuration
+
+The application supports optional key remapping via a `config.json` file.
+
+### Config file location
+
+- Place `config.json` **next to the executable** (for the Windows binary), or  
+- In the same directory as `input_monitor.py` when running from source.
+
+If no config file is found, **built-in defaults are used automatically**.
+
+---
+
+### `config.json` format
+
+```json
+{
+  "keys": {
+    "left": "a",
+    "right": "d",
+    "walk": "shift",
+    "crouch": "ctrl",
+    "pause": "tab"
+  }
+}
+
