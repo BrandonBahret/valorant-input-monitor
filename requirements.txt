@@ -8,6 +8,4 @@ pefile==2024.8.26
 pillow==12.1.0
 PyAudio==0.2.14
 pygame==2.6.1
-pyinstaller==6.18.0
-pyinstaller-hooks-contrib==2026.0
 pywin32-ctypes==0.2.3
