@@ -10,6 +10,7 @@ Tracks shooting accuracy based on movement velocity and provides audio feedback.
 import sys
 import time
 import ctypes
+from pathlib import Path
 from typing import List, Tuple, Optional
 from queue import Queue
 
@@ -19,6 +20,16 @@ import numpy as np
 
 from beeper import ContinuousWavePlayer
 
+
+def resource_path(relative_path: str) -> Path:
+    if getattr(sys, "frozen", False):
+        # Nuitka sets sys.frozen
+        return Path(sys.executable).parent / relative_path
+    return Path(__file__).parent / relative_path
+
+
+# Use the PNG for the pygame window icon (better quality)
+ICON_PATH = resource_path("assets/favicon-512x512.png")
 
 # Display Configuration
 DEFAULT_WIDTH = 1400
@@ -244,6 +255,10 @@ class InputMonitor:
             vsync=1
         )      
         pygame.display.set_caption("Input Monitor")
+        
+        icon_image = pygame.image.load(str(ICON_PATH))
+        pygame.display.set_icon(icon_image)        
+        
         self.clock = pygame.time.Clock()
         
         # Core components

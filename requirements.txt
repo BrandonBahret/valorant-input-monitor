@@ -1,4 +1,13 @@
+altgraph==0.17.5
 keyboard==0.13.5
+Nuitka==4.0
 numpy==2.4.2
+ordered-set==4.1.0
+packaging==26.0
+pefile==2024.8.26
+pillow==12.1.0
 PyAudio==0.2.14
 pygame==2.6.1
+pyinstaller==6.18.0
+pyinstaller-hooks-contrib==2026.0
+pywin32-ctypes==0.2.3
