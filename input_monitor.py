@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import List, Tuple, Optional
 from queue import Queue
 
+import nuitka
 import pygame
 import keyboard
 import numpy as np
@@ -23,14 +24,19 @@ from beeper import ContinuousWavePlayer
 
 
 def resource_path(relative_path: str) -> Path:
-    if getattr(sys, "frozen", False):
-        # Nuitka sets sys.frozen
-        return Path(sys.executable).parent / relative_path
+    exe_dir = Path(sys.argv[0]).resolve().parent
+    return exe_dir / relative_path
+
+def bundled_resource_path(relative_path: str) -> Path:
+    # if running in a compiled app
+    if getattr(nuitka, "Compiled", False):
+        # Nuitka sets __file__ to temp folder in onefile mode
+        return Path(__file__).parent / relative_path
+    # dev mode
     return Path(__file__).parent / relative_path
 
-
 # Use the PNG for the pygame window icon (better quality)
-ICON_PATH = resource_path("assets/favicon-512x512.png")
+ICON_PATH = bundled_resource_path("assets/favicon-512x512.png")
 
 # Display Configuration
 DEFAULT_WIDTH = 1400
@@ -820,7 +826,7 @@ class InputMonitor:
             current_x += walk_text.get_width() + self.get_scaled_value(20)
         
         keys = self.config['keys']
-        help_text = self._get_cached_text(f"{str(keys['pause']).upper()}: Pause/Resume  |  SHIFT: Walk", CENTER_LINE)
+        help_text = self._get_cached_text(f"{str(keys['pause']).upper()}: Pause/Resume", CENTER_LINE)
         help_x = self.window_width - self.get_scaled_value(350)
         self.screen.blit(help_text, (help_x, bottom_y))
     
