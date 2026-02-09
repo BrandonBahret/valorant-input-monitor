@@ -54,6 +54,7 @@ If no config file is found, **built-in defaults are used automatically**.
     "walk": "shift",
     "crouch": "ctrl",
     "pause": "tab"
-  }
+  },
+  "volume": 1.0
 }
 

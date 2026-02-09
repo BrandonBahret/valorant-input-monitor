@@ -20,7 +20,8 @@ import pygame
 import keyboard
 import numpy as np
 
-from beeper import ContinuousWavePlayer
+# from beeper import ContinuousWavePlayer
+from audio_generator import PygameAudioPlayer, SoundType
 
 
 def resource_path(relative_path: str) -> Path:
@@ -45,7 +46,7 @@ MIN_WIDTH = 800
 MIN_HEIGHT = 600
 
 # Gameplay Constants
-FIRE_RATE_MS = 1000 / 16
+FIRE_RATE_MS = 1000 / 13
 OVERLAP_BUFFER_MS = 70
 
 # Color Palette
@@ -66,7 +67,8 @@ DEFAULT_CONFIG = {
         "walk": "shift",
         "crouch": "ctrl",
         "pause": "tab"
-    }
+    },
+    "volume": 1.0
 }
 
 # Windows API
@@ -96,6 +98,7 @@ def load_config() -> dict:
         **DEFAULT_CONFIG["keys"],
         **user_cfg.get("keys", {})
     }
+    merged["volume"] = user_cfg.get("volume", 1.0)
     return merged
 
 
@@ -354,10 +357,6 @@ class InputMonitor:
         self.velocity_sim = VelocitySimulator()
         self.shooting_tracker = ShootingTracker(self.velocity_sim)
         
-        # Audio feedback - separate beepers for different purposes
-        self.inaccuracy_beeper = ContinuousWavePlayer()
-        self.beeper_queue = Queue()
-        self.beeper_active = False
         
         # Optimized data storage using numpy ring buffers
         self.time_points = RingBuffer(MAX_BUFFER_SIZE, dtype=np.float64)
@@ -376,6 +375,14 @@ class InputMonitor:
         self.shift_key_held = False
         self.ctrl_key_held = False
         self.prev_mouse_held = False
+        self.volume = float(self.config['volume'])
+        
+        # Audio feedback - separate beepers for different purposes
+        # self.inaccuracy_beeper = ContinuousWavePlayer()
+        self.inaccuracy_beeper = PygameAudioPlayer()
+        self.inaccuracy_beeper.set_min_duration(0.2)
+        self.beeper_queue = Queue()
+        self.beeper_active = False
         
         # Application state
         self.paused = False
@@ -517,7 +524,7 @@ class InputMonitor:
             try:
                 cmd = self.beeper_queue.get_nowait()
                 if cmd == 'start':
-                    self.inaccuracy_beeper.start()
+                    self.inaccuracy_beeper.start(SoundType.SHOOTING, volume=self.volume, loop_duration=0.7)
                 elif cmd == 'stop':
                     self.inaccuracy_beeper.stop()
             except:
