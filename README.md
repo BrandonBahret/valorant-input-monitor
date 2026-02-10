@@ -56,14 +56,14 @@ If no config file is found, **built-in defaults are used automatically**.
     "pause": "tab"
   },
   "video": {
-    "enabled": true,  // Enabled: Run headless (true, false)
-    "vsync": true,    // VSync: (true, false)
-    "target_fps": 165 // Target FPS: (e.g, 60fps)
+    "enabled": true,  // Video Enabled: Run with window (true, false)
+    "vsync": true,    // VSync: Sync to monitor refresh rate (true, false)
+    "target_fps": 60  // Target FPS: Used when vsync is false (e.g., 30, 60, 144)
   },
   "audio": {
-    "volume": 1.0,        // Volume: (0 .. 1)
-    "sound_type": 3,      // Sound Type: (1, 2, .. 6)
-    "loop_duration": 1000 // Loop Duration: (e.g, 1000ms)
+    "volume": 1.0,        // Volume: Audio volume level (0.0 to 1.0)
+    "sound_type": 1,      // Sound Type: Audio feedback style (1, 2, 3, 4, 5, 6)
+    "loop_duration": 1000 // Loop Duration: Audio loop timing in milliseconds (e.g., 500, 1000, 1500)
   }
 }
 ```

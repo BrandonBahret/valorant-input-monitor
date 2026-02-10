@@ -9,11 +9,11 @@
   "video": {
     "enabled": true,
     "vsync": true,
-    "target_fps": 200
+    "target_fps": 165
   },
   "audio": {
     "volume": 1.0,
     "sound_type": 1,
-    "loop_duration": 800
+    "loop_duration": 1000
   }
 }
