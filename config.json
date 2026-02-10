@@ -6,7 +6,14 @@
     "crouch": "ctrl",
     "pause": "tab"
   },
-  "volume": 0.5,
-  "sound_type": 3,
-  "loop_duration": 1000 
+  "video": {
+    "enabled": true,
+    "vsync": true,
+    "target_fps": 200
+  },
+  "audio": {
+    "volume": 1.0,
+    "sound_type": 1,
+    "loop_duration": 800
+  }
 }

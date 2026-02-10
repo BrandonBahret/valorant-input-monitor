@@ -55,9 +55,15 @@ If no config file is found, **built-in defaults are used automatically**.
     "crouch": "ctrl",
     "pause": "tab"
   },
-  "volume": 0.5,        // Volume: (0 .. 1)
-  "sound_type": 3,      // Sound Type: (1, 2, .. 6)
-  "loop_duration": 1000 // Loop Duration: (e.g, 1000ms)
+  "video": {
+    "enabled": true,  // Enabled: Run headless (true, false)
+    "vsync": true,    // VSync: (true, false)
+    "target_fps": 165 // Target FPS: (e.g, 60fps)
+  },
+  "audio": {
+    "volume": 1.0,        // Volume: (0 .. 1)
+    "sound_type": 3,      // Sound Type: (1, 2, .. 6)
+    "loop_duration": 1000 // Loop Duration: (e.g, 1000ms)
+  }
 }
-
-
+```

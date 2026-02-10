@@ -67,9 +67,16 @@ DEFAULT_CONFIG = {
         "crouch": "ctrl",
         "pause": "tab"
     },
-    "volume": 1.0,
-    "sound_type": 1,
-    "loop_duration": 1000 # ms
+    "video": {
+        "enabled": True,       # False = audio only, no window
+        "vsync": True,         # True = vsync, False = use target_fps
+        "target_fps": None     # FPS limit when vsync is False
+    },
+    "audio": {
+        "volume": 1.0,
+        "sound_type": 1,       # 1-6: different sound profiles
+        "loop_duration": 1000  # ms
+    }
 }
 
 # Windows API
@@ -83,30 +90,35 @@ MATH_LOG2 = 0.6931471805599453  # Pre-computed ln(2)
 def load_config() -> dict:
     def apply_sound_option(config: dict, user_cfg: dict) -> dict:
         sound_options = {
-            1: SoundType.FOOTSTEP,
-            2: SoundType.SHOOTING,
-            3: SoundType.MOVING_SHOOTING,
+            1: SoundType.MOVING_SHOOTING,
+            2: SoundType.FOOTSTEP,
+            3: SoundType.SHOOTING,
             4: SoundType.RUNNING_GUNNING,
             5: SoundType.ABILITY,
             6: SoundType.ALERT,
         }
-        option = user_cfg.get("sound_type", 1)
-        config["sound_type"] = sound_options.get(option, sound_options[1])
-        config["loop_duration"] = user_cfg.get("loop_duration", 1000) / 1000
-        config["volume"] = user_cfg.get("volume", 1.0)
+        
+        # Handle legacy config format or new audio group
+        audio_cfg = user_cfg.get("audio", {})
+        option = audio_cfg.get("sound_type", user_cfg.get("sound_type", 1))
+        
+        config["audio"]["sound_type"] = sound_options.get(option, sound_options[1])
+        config["audio"]["loop_duration"] = audio_cfg.get("loop_duration", user_cfg.get("loop_duration", 1000)) / 1000
+        config["audio"]["volume"] = audio_cfg.get("volume", user_cfg.get("volume", 1.0))
+        
         return config
     
     config_path: Path = resource_path("config.json")
 
     if not config_path.exists():
-        return apply_sound_option(DEFAULT_CONFIG, {})
+        return apply_sound_option(DEFAULT_CONFIG.copy(), {})
 
     try:
         with config_path.open("r", encoding="utf-8") as f:
             user_cfg = json.load(f)
     except Exception as e:
         print(f"[Config] Failed to load config.json, using defaults: {e}")
-        return apply_sound_option(DEFAULT_CONFIG, {})
+        return apply_sound_option(DEFAULT_CONFIG.copy(), {})
 
     # Merge user keys over defaults
     merged = DEFAULT_CONFIG.copy()
@@ -114,6 +126,29 @@ def load_config() -> dict:
         **DEFAULT_CONFIG["keys"],
         **user_cfg.get("keys", {})
     }
+    
+    # Merge video settings (handle legacy low_resources format)
+    video_cfg = user_cfg.get("video", {})
+    legacy_cfg = user_cfg.get("low_resources", {})
+    
+    merged["video"] = {
+        **DEFAULT_CONFIG["video"],
+        **video_cfg
+    }
+    
+    # Legacy support: map old low_resources to new video format
+    if "no_graphics" in legacy_cfg:
+        merged["video"]["enabled"] = not legacy_cfg["no_graphics"]
+    if "target_fps" in legacy_cfg and legacy_cfg["target_fps"] is not None:
+        merged["video"]["vsync"] = False
+        merged["video"]["target_fps"] = legacy_cfg["target_fps"]
+    
+    # Merge audio settings
+    merged["audio"] = {
+        **DEFAULT_CONFIG["audio"],
+        **user_cfg.get("audio", {})
+    }
+    
     return apply_sound_option(merged, user_cfg)
 
 
@@ -352,26 +387,63 @@ class InputMonitor:
     """Main application for visualizing keyboard and mouse inputs."""
     
     def __init__(self):
-        pygame.init()
+        # Load config first to check video settings
+        self.config = load_config()
+        self.video_enabled = self.config['video']['enabled']
         
-        self.window_width = DEFAULT_WIDTH
-        self.window_height = DEFAULT_HEIGHT
-        self.screen = pygame.display.set_mode(
-            (self.window_width, self.window_height),
-            pygame.DOUBLEBUF | pygame.SCALED,
-            vsync=1
-        )      
-        pygame.display.set_caption("Input Monitor")
-        
-        icon_image = pygame.image.load(str(ICON_PATH))
-        pygame.display.set_icon(icon_image)        
-        
-        self.clock = pygame.time.Clock()
+        # Initialize pygame conditionally
+        if self.video_enabled:
+            pygame.init()
+            
+            self.window_width = DEFAULT_WIDTH
+            self.window_height = DEFAULT_HEIGHT
+            
+            # Configure vsync or target fps
+            use_vsync = self.config['video']['vsync']
+            target_fps = self.config['video']['target_fps']
+            
+            if use_vsync:
+                # Use vsync
+                self.screen = pygame.display.set_mode(
+                    (self.window_width, self.window_height),
+                    pygame.DOUBLEBUF | pygame.SCALED,
+                    vsync=1
+                )
+                self.use_vsync = True
+                self.target_fps = None
+            else:
+                # Use custom FPS target
+                self.screen = pygame.display.set_mode(
+                    (self.window_width, self.window_height),
+                    pygame.DOUBLEBUF | pygame.SCALED
+                )
+                self.use_vsync = False
+                self.target_fps = target_fps
+            
+            pygame.display.set_caption("Input Monitor")
+            
+            icon_image = pygame.image.load(str(ICON_PATH))
+            pygame.display.set_icon(icon_image)        
+            
+            self.clock = pygame.time.Clock()
+            
+            # Cached rendering resources
+            self._font_cache = {}
+            self._static_surface = None
+            self._need_static_redraw = True
+            
+            self.update_fonts()
+        else:
+            # No graphics mode - minimal pygame init for audio only
+            pygame.mixer.init()
+            self.screen = None
+            self.clock = None
+            self.window_width = DEFAULT_WIDTH
+            self.window_height = DEFAULT_HEIGHT
         
         # Core components
         self.velocity_sim = VelocitySimulator()
         self.shooting_tracker = ShootingTracker(self.velocity_sim)
-        
         
         # Optimized data storage using numpy ring buffers
         self.time_points = RingBuffer(MAX_BUFFER_SIZE, dtype=np.float64)
@@ -384,16 +456,14 @@ class InputMonitor:
         self.bullet_fired_points = RingBuffer(MAX_BUFFER_SIZE, dtype=np.uint8)
         
         # Input state
-        self.config = load_config()
         self.a_key_held = False
         self.d_key_held = False
         self.shift_key_held = False
         self.ctrl_key_held = False
         self.prev_mouse_held = False
-        self.volume = float(self.config['volume'])
+        self.volume = float(self.config['audio']['volume'])
         
         # Audio feedback - separate beepers for different purposes
-        # self.inaccuracy_beeper = ContinuousWavePlayer()
         self.inaccuracy_beeper = PygameAudioPlayer()
         self.inaccuracy_beeper.set_min_duration(0.2)
         self.accuracy_beeper = PygameAudioPlayer()
@@ -407,16 +477,18 @@ class InputMonitor:
         self.current_time = 0.0
         self.last_update = time.time()
         
-        # Cached rendering resources
-        self._font_cache = {}
-        self._static_surface = None
-        self._need_static_redraw = True
-        
-        self.update_fonts()
         self._setup_input_hooks()
+        
+        # Print startup message in no_graphics mode
+        if not self.video_enabled:
+            print("[Input Monitor] Running in audio-only mode (video disabled)")
+            print(f"[Input Monitor] Keys: {self.config['keys']['left'].upper()}/{self.config['keys']['right'].upper()} movement, {self.config['keys']['pause'].upper()} pause")
     
     def update_fonts(self):
         """Scale fonts based on window height."""
+        if not self.video_enabled:
+            return
+            
         scale = self.window_height / DEFAULT_HEIGHT
         font_size = max(20, int(28 * scale))
         small_font_size = max(14, int(20 * scale))
@@ -434,6 +506,9 @@ class InputMonitor:
     
     def handle_resize(self, new_width: int, new_height: int):
         """Handle window resize events."""
+        if not self.video_enabled:
+            return
+            
         self.window_width = max(MIN_WIDTH, new_width)
         self.window_height = max(MIN_HEIGHT, new_height)
         self.update_fonts()
@@ -479,6 +554,9 @@ class InputMonitor:
     def _toggle_pause(self):
         """Toggle pause state."""
         self.paused = not self.paused
+        if not self.video_enabled:
+            status = "PAUSED" if self.paused else "RECORDING"
+            print(f"[Input Monitor] {status}")
     
     def _poll_mouse_state(self):
         """Check mouse button state using Windows API and handle state changes."""
@@ -544,7 +622,11 @@ class InputMonitor:
             try:
                 cmd = self.beeper_queue.get_nowait()
                 if cmd == 'start':
-                    self.inaccuracy_beeper.start(self.config["sound_type"], self.volume, loop_duration=self.config["loop_duration"])
+                    self.inaccuracy_beeper.start(
+                        self.config["audio"]["sound_type"], 
+                        self.volume, 
+                        loop_duration=self.config["audio"]["loop_duration"]
+                    )
                 elif cmd == 'stop':
                     self.inaccuracy_beeper.stop()
                 # elif cmd == "accurate": # For example, playing audio cues for new events
@@ -562,6 +644,9 @@ class InputMonitor:
     
     def draw_chart(self):
         """Render the main visualization with optimizations."""
+        if not self.video_enabled:
+            return
+            
         # Draw static elements if needed
         if self._need_static_redraw:
             self._draw_static_elements()
@@ -865,16 +950,27 @@ class InputMonitor:
         """Main application loop."""
         try:
             while self.running:
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
-                        self.running = False
-                    elif event.type == pygame.VIDEORESIZE:
-                        self.handle_resize(event.w, event.h)
+                if self.video_enabled:
+                    for event in pygame.event.get():
+                        if event.type == pygame.QUIT:
+                            self.running = False
+                        elif event.type == pygame.VIDEORESIZE:
+                            self.handle_resize(event.w, event.h)
                 
                 self.update_data()
-                self.draw_chart()
-                pygame.display.flip()
-                self.clock.tick()
+                
+                if self.video_enabled:
+                    self.draw_chart()
+                    pygame.display.flip()
+                    
+                    # Apply FPS limiting
+                    if self.target_fps is not None:
+                        self.clock.tick(self.target_fps)
+                    else:
+                        self.clock.tick()
+                else:
+                    # In video-disabled mode, sleep briefly to avoid CPU spinning
+                    time.sleep(0.001)
         finally:
             self._cleanup()
     
@@ -887,7 +983,12 @@ class InputMonitor:
                 pass
 
         keyboard.unhook_all()
-        pygame.quit()
+        
+        if self.video_enabled:
+            pygame.quit()
+        else:
+            pygame.mixer.quit()
+            
         sys.exit()
 
 
