@@ -6,5 +6,7 @@
     "crouch": "ctrl",
     "pause": "tab"
   },
-  "volume": 0.5
+  "volume": 0.5,
+  "sound_type": 3,
+  "loop_duration": 1000 
 }

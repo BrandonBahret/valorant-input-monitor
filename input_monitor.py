@@ -20,7 +20,6 @@ import pygame
 import keyboard
 import numpy as np
 
-# from beeper import ContinuousWavePlayer
 from audio_generator import PygameAudioPlayer, SoundType
 
 
@@ -68,7 +67,9 @@ DEFAULT_CONFIG = {
         "crouch": "ctrl",
         "pause": "tab"
     },
-    "volume": 1.0
+    "volume": 1.0,
+    "sound_type": 1,
+    "loop_duration": 1000 # ms
 }
 
 # Windows API
@@ -80,17 +81,32 @@ MATH_LOG2 = 0.6931471805599453  # Pre-computed ln(2)
 
 
 def load_config() -> dict:
+    def apply_sound_option(config: dict, user_cfg: dict) -> dict:
+        sound_options = {
+            1: SoundType.FOOTSTEP,
+            2: SoundType.SHOOTING,
+            3: SoundType.MOVING_SHOOTING,
+            4: SoundType.RUNNING_GUNNING,
+            5: SoundType.ABILITY,
+            6: SoundType.ALERT,
+        }
+        option = user_cfg.get("sound_type", 1)
+        config["sound_type"] = sound_options.get(option, sound_options[1])
+        config["loop_duration"] = user_cfg.get("loop_duration", 1000) / 1000
+        config["volume"] = user_cfg.get("volume", 1.0)
+        return config
+    
     config_path: Path = resource_path("config.json")
 
     if not config_path.exists():
-        return DEFAULT_CONFIG
+        return apply_sound_option(DEFAULT_CONFIG, {})
 
     try:
         with config_path.open("r", encoding="utf-8") as f:
             user_cfg = json.load(f)
     except Exception as e:
         print(f"[Config] Failed to load config.json, using defaults: {e}")
-        return DEFAULT_CONFIG
+        return apply_sound_option(DEFAULT_CONFIG, {})
 
     # Merge user keys over defaults
     merged = DEFAULT_CONFIG.copy()
@@ -98,8 +114,7 @@ def load_config() -> dict:
         **DEFAULT_CONFIG["keys"],
         **user_cfg.get("keys", {})
     }
-    merged["volume"] = user_cfg.get("volume", 1.0)
-    return merged
+    return apply_sound_option(merged, user_cfg)
 
 
 class VelocitySimulator:
@@ -381,6 +396,8 @@ class InputMonitor:
         # self.inaccuracy_beeper = ContinuousWavePlayer()
         self.inaccuracy_beeper = PygameAudioPlayer()
         self.inaccuracy_beeper.set_min_duration(0.2)
+        self.accuracy_beeper = PygameAudioPlayer()
+        self.accuracy_beeper.set_min_duration(0.2)
         self.beeper_queue = Queue()
         self.beeper_active = False
         
@@ -494,7 +511,10 @@ class InputMonitor:
         self.current_time += dt
         
         # Update physics
+        prev_velocity = self.velocity_sim.velocity
         velocity = self.velocity_sim.update(dt, self.a_key_held, self.d_key_held, self.shift_key_held or self.ctrl_key_held)
+        if abs(prev_velocity) != velocity and velocity == 0:
+            self.beeper_queue.put("accurate")
         
         # Check for bullet fire
         bullet_fired_inaccurate = self.shooting_tracker.check_bullet_fire(current_real_time)
@@ -524,9 +544,11 @@ class InputMonitor:
             try:
                 cmd = self.beeper_queue.get_nowait()
                 if cmd == 'start':
-                    self.inaccuracy_beeper.start(SoundType.SHOOTING, volume=self.volume, loop_duration=0.7)
+                    self.inaccuracy_beeper.start(self.config["sound_type"], self.volume, loop_duration=self.config["loop_duration"])
                 elif cmd == 'stop':
                     self.inaccuracy_beeper.stop()
+                # elif cmd == "accurate": # For example, playing audio cues for new events
+                #     self.accuracy_beeper.play(SoundType.SUCCESS, self.volume)
             except:
                 break
     
@@ -802,9 +824,11 @@ class InputMonitor:
         legend_spacing = self.get_scaled_value(100)
         legend_x = self.window_width - self.get_scaled_value(480)
         
+        left = self.config['keys']['left'].upper()
+        right = self.config['keys']['right'].upper()
         labels = [
-            ("A Key", BLUE),
-            ("D Key", RED),
+            (f"{left} Key", BLUE),
+            (f"{right} Key", RED),
             ("Click", WHITE),
             ("Velocity", YELLOW)
         ]

@@ -53,7 +53,7 @@ class PygameAudioPlayer:
         """
         # Initialize pygame mixer
         pygame.mixer.init(frequency=sample_rate, size=-16, channels=2, buffer=512)
-        
+                
         self.sample_rate = sample_rate
         
         # Timing and state
