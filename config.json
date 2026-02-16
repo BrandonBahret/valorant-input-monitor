@@ -5,10 +5,7 @@
     "walk": "shift",
     "crouch": "ctrl",
     "pause": "tab",
-    "practice_mode": "p",
-    "start_pattern": "space",
-    "next_pattern": "right",
-    "prev_pattern": "left"
+    "practice_mode": "m"
   },
   "video": {
     "enabled": true,

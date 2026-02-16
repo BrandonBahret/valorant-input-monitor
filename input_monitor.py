@@ -5,18 +5,11 @@ Input Monitor - Enhanced with Pattern Practice Mode
 
 Real-time visualization of keyboard and mouse inputs with velocity tracking.
 Includes pattern recording and practice modes for training strafe and click timing.
-
-FIX: Corrected pattern segment timing to use actual press/release timestamps
-ENHANCEMENT: Added tolerance adjustment, inappropriate input detection, walk/crouch tracking
-REFACTOR: Extracted pattern evaluation into separate PatternEvaluator class
-UPDATE: Pattern recorder now uses timeline visualization matching evaluator
 """
 
-import json
 import sys
 import time
 import ctypes
-from pathlib import Path
 from typing import List, Tuple, Optional, Dict
 from queue import Queue
 from enum import Enum
@@ -26,74 +19,10 @@ import keyboard
 import numpy as np
 
 from audio_generator import PygameAudioPlayer, SoundType
+from datastructures import RingBuffer
 from pattern_eval import Pattern, PatternEvaluator, PatternManager, PatternSegment
-from resource_helpers import bundled_resource_path, resource_path
-
-
-# Use the PNG for the pygame window icon (better quality)
-try:
-    ICON_PATH = bundled_resource_path("assets/favicon-512x512.png")
-except:
-    ICON_PATH = None
-
-# Display Configuration
-DEFAULT_WIDTH = 1400
-DEFAULT_HEIGHT = 700
-MIN_WIDTH = 800
-MIN_HEIGHT = 600
-
-# Gameplay Constants
-FIRE_RATE_MS = 1000 / 13
-OVERLAP_BUFFER_MS = 70
-
-# Color Palette
-DARK_BG = (15, 15, 20)
-GRID_COLOR = (30, 35, 40)
-CENTER_LINE = (60, 65, 70)
-BLACK = (0, 0, 0)
-WHITE = (255, 255, 255)
-BLUE = (80, 180, 255)
-RED = (255, 80, 80)
-GREEN = (100, 255, 150)
-YELLOW = (255, 220, 80)
-GRAY = (130, 130, 130)
-ORANGE = (255, 140, 60)
-PURPLE = (180, 100, 255)
-CYAN = (60, 200, 255)
-DARK_BLUE = (40, 80, 120)
-DARK_RED = (120, 40, 40)
-DARK_CYAN = (40, 100, 120)
-DARK_PURPLE = (90, 50, 130)
-
-DEFAULT_CONFIG = {
-  "keys": {
-    "left": "a",
-    "right": "d",
-    "walk": "shift",
-    "crouch": "ctrl",
-    "pause": "tab",
-  },
-  "video": {
-    "enabled": True,
-    "vsync": True,
-    "target_fps": None
-  },
-  "audio": {
-    "volume": 1.0,
-    "sound_type": 1,
-    "loop_duration": 500,
-    "accel_sound_type": 3,
-    "constant_sound_type": 4,
-    "decel_sound_type": 2
-  }
-}
-
-# Windows API
-VK_LBUTTON = 0x01
-
-# Performance constants
-MAX_BUFFER_SIZE = 1750
-MATH_LOG2 = 0.6931471805599453
+from app_config import *
+from velocity_simulator import InaccuracyType, ShootingTracker, VelocitySimulator
 
 
 class AppMode(Enum):
@@ -102,15 +31,6 @@ class AppMode(Enum):
     PATTERN_CREATE = 1
     PATTERN_SELECT = 2
     PATTERN_PRACTICE = 3
-
-
-class InaccuracyType(Enum):
-    """Types of shooting inaccuracy."""
-    NONE = 0
-    ACCELERATING = 1
-    CONSTANT = 2
-    DECELERATING = 3
-
 
 class Toast:
     """Temporary notification message."""
@@ -158,314 +78,6 @@ class Toast:
         text_x = bg_x + padding
         text_y = bg_y + padding // 2
         screen.blit(text_with_alpha, (text_x, text_y))
-
-
-def load_config() -> dict:
-    def apply_sound_option(config: dict, user_cfg: dict) -> dict:
-        sound_options = {
-            1: SoundType.MOVING_SHOOTING,
-            2: SoundType.FOOTSTEP,
-            3: SoundType.SHOOTING,
-            4: SoundType.RUNNING_GUNNING,
-            5: SoundType.ABILITY,
-            6: SoundType.ALERT,
-        }
-        short_sound_options = {
-            1: SoundType.RELOAD,
-            2: SoundType.JUMP,
-            3: SoundType.SUCCESS,
-            4: SoundType.ERROR,
-        }
-        
-        audio_cfg = user_cfg.get("audio", {})
-        option = audio_cfg.get("sound_type", user_cfg.get("sound_type", 1))
-        
-        config["audio"]["sound_type"] = sound_options.get(option, sound_options[1])
-        config["audio"]["loop_duration"] = audio_cfg.get("loop_duration", user_cfg.get("loop_duration", 1000)) / 1000
-        config["audio"]["volume"] = audio_cfg.get("volume", user_cfg.get("volume", 1.0))
-        
-        accel_option = audio_cfg.get("accel_sound_type", 3)
-        constant_option = audio_cfg.get("constant_sound_type", 4)
-        decel_option = audio_cfg.get("decel_sound_type", 2)
-        config["audio"]["accel_sound_type"] = sound_options.get(accel_option, sound_options[3])
-        config["audio"]["constant_sound_type"] = sound_options.get(constant_option, sound_options[4])
-        config["audio"]["decel_sound_type"] = short_sound_options.get(decel_option, short_sound_options[1])
-        
-        return config
-    
-    config_path: Path = resource_path("config.json")
-
-    if not config_path.exists():
-        return apply_sound_option(DEFAULT_CONFIG.copy(), {})
-
-    try:
-        with config_path.open("r", encoding="utf-8") as f:
-            user_cfg = json.load(f)
-    except Exception as e:
-        print(f"[Config] Failed to load config.json, using defaults: {e}")
-        return apply_sound_option(DEFAULT_CONFIG.copy(), {})
-
-    merged = DEFAULT_CONFIG.copy()
-    merged["keys"] = {
-        **DEFAULT_CONFIG["keys"],
-        **user_cfg.get("keys", {})
-    }
-    
-    video_cfg = user_cfg.get("video", {})
-    legacy_cfg = user_cfg.get("low_resources", {})
-    
-    merged["video"] = {
-        **DEFAULT_CONFIG["video"],
-        **video_cfg
-    }
-    
-    if "no_graphics" in legacy_cfg:
-        merged["video"]["enabled"] = not legacy_cfg["no_graphics"]
-    if "target_fps" in legacy_cfg and legacy_cfg["target_fps"] is not None:
-        merged["video"]["vsync"] = False
-        merged["video"]["target_fps"] = legacy_cfg["target_fps"]
-    
-    merged["audio"] = {
-        **DEFAULT_CONFIG["audio"],
-        **user_cfg.get("audio", {})
-    }
-    
-    return apply_sound_option(merged, user_cfg)
-
-
-class VelocitySimulator:
-    """Simulates player movement velocity with acceleration and deceleration."""
-    
-    __slots__ = ('velocity', 'direction', 'accel_progress', 'max_velocity', 
-                 'accel_time', 'velocity_threshold', 'decel_half_life',
-                 '_log2_decel', '_accel_exp', 'base_max_velocity', 'base_accel_time',
-                 'walk_velocity_multiplier', 'walk_accel_multiplier', 'is_walking',
-                 'is_accelerating', 'prev_velocity')
-    
-    def __init__(self):
-        self.velocity = 0.0
-        self.direction = 0
-        self.accel_progress = 0.0
-        
-        self.base_max_velocity = 1.0
-        self.base_accel_time = 0.480
-        self.velocity_threshold = 0.0148
-        self.decel_half_life = 0.02125
-        
-        self.walk_velocity_multiplier = 0.52
-        self.walk_accel_multiplier = 1.00
-        
-        self.max_velocity = self.base_max_velocity
-        self.accel_time = self.base_accel_time
-        self.is_walking = False
-        
-        self.is_accelerating = False
-        self.prev_velocity = 0.0
-        
-        self._log2_decel = MATH_LOG2 / self.decel_half_life
-        self._accel_exp = 1.45
-    
-    def update(self, dt: float, a_held: bool, d_held: bool, shift_held: bool = False) -> float:
-        """Update velocity based on input state and return current velocity with direction."""
-        self._update_walk_state(shift_held)
-        self.prev_velocity = self.velocity
-        
-        desired_direction = 0
-        if a_held and not d_held:
-            desired_direction = -1
-        elif d_held and not a_held:
-            desired_direction = 1
-        
-        if desired_direction == 0:
-            self._apply_deceleration(dt)
-            self.is_accelerating = False
-        elif desired_direction == self.direction or self.direction == 0:
-            self._apply_acceleration(dt, desired_direction)
-            self.is_accelerating = self.velocity > self.prev_velocity
-        else:
-            self._apply_direction_change(dt, desired_direction)
-            self.is_accelerating = False
-        
-        return self.velocity * self.direction
-    
-    def _update_walk_state(self, shift_held: bool):
-        """Update physics parameters based on walk state."""
-        was_walking = self.is_walking
-        self.is_walking = shift_held
-        
-        if self.is_walking:
-            self.max_velocity = self.base_max_velocity * self.walk_velocity_multiplier
-            self.accel_time = self.base_accel_time * self.walk_accel_multiplier
-        else:
-            self.max_velocity = self.base_max_velocity
-            self.accel_time = self.base_accel_time
-        
-        if was_walking != self.is_walking and self.accel_progress > 0:
-            if self.max_velocity > 0:
-                eased_velocity_ratio = self.velocity / self.max_velocity
-                self.accel_progress = min(1.0, eased_velocity_ratio ** (1.0 / self._accel_exp))
-    
-    def is_moving(self) -> bool:
-        """Check if velocity exceeds accuracy threshold."""
-        return self.velocity > self.velocity_threshold
-    
-    def is_near_max_velocity(self) -> bool:
-        """Check if velocity is approaching maximum (above 75%)."""
-        return self.velocity > 0.75 * self.max_velocity
-    
-    def get_velocity_ratio(self) -> float:
-        """Get current velocity as ratio of max velocity (0.0 to 1.0)."""
-        return self.velocity / self.max_velocity if self.max_velocity > 0 else 0.0
-    
-    def is_decelerating(self) -> bool:
-        """Check if we're currently decelerating."""
-        return self.is_moving() and not self.is_accelerating and self.velocity < self.prev_velocity
-    
-    def _apply_acceleration(self, dt: float, direction: int):
-        """Accelerate in the desired direction with easing curve."""
-        self.accel_progress = min(1.0, self.accel_progress + dt / self.accel_time)
-        eased_progress = self.accel_progress ** self._accel_exp
-        self.velocity = eased_progress * self.max_velocity
-        self.direction = direction
-    
-    def _apply_deceleration(self, dt: float):
-        """Exponential decay when no input."""
-        self.accel_progress = 0.0
-        decay_factor = np.exp(-dt * self._log2_decel)
-        self.velocity *= decay_factor
-        
-        if self.velocity < 0.01:
-            self.velocity = 0.0
-            self.direction = 0
-    
-    def _apply_direction_change(self, dt: float, new_direction: int):
-        """Handle counter-strafing when changing direction."""
-        self.accel_progress = 0.0
-        decay_factor = np.exp(-dt * self._log2_decel)
-        self.velocity *= decay_factor
-        
-        if self.velocity < 0.01:
-            self.velocity = 0.0
-            self.direction = new_direction
-
-
-class ShootingTracker:
-    """Tracks shooting mechanics including fire rate, accuracy, and grace periods."""
-    
-    __slots__ = ('velocity_sim', 'mouse_held', 'mouse_press_time', 'last_bullet_time',
-                 'inaccuracy_type', 'movement_start_time', 'was_moving')
-    
-    def __init__(self, velocity_sim: VelocitySimulator):
-        self.velocity_sim = velocity_sim
-        self.mouse_held = False
-        self.mouse_press_time = 0.0
-        self.last_bullet_time = 0.0
-        self.inaccuracy_type = InaccuracyType.NONE
-        self.movement_start_time = 0.0
-        self.was_moving = False
-    
-    def on_mouse_press(self, current_time: float):
-        """Handle mouse button press."""
-        self.mouse_press_time = current_time
-        self.last_bullet_time = current_time - (FIRE_RATE_MS / 1000.0)
-        self.mouse_held = True
-        self.inaccuracy_type = InaccuracyType.NONE
-        self.movement_start_time = 0.0
-        self.was_moving = False
-    
-    def on_mouse_release(self):
-        """Handle mouse button release."""
-        self.mouse_held = False
-        self.movement_start_time = 0.0
-        self.was_moving = False
-    
-    def check_bullet_fire(self, current_time: float) -> InaccuracyType:
-        """Check if a bullet should fire and return the type of inaccuracy."""
-        if not self.mouse_held:
-            return InaccuracyType.NONE
-        
-        is_moving_now = self.velocity_sim.is_moving()
-        
-        if is_moving_now and not self.was_moving and self.mouse_held:
-            time_since_click = (current_time - self.mouse_press_time) * 1000
-            if time_since_click > 0:
-                self.movement_start_time = current_time
-        elif not is_moving_now:
-            self.movement_start_time = 0.0
-        
-        self.was_moving = is_moving_now
-        
-        self.last_bullet_time = current_time
-        
-        inaccuracy = self._check_inaccuracy(current_time, is_moving_now)
-        if inaccuracy != InaccuracyType.NONE:
-            self.inaccuracy_type = inaccuracy
-        
-        return inaccuracy
-    
-    def _check_inaccuracy(self, current_time: float, is_moving: bool) -> InaccuracyType:
-        """Determine the type of inaccuracy based on movement and grace period."""
-        if not is_moving:
-            return InaccuracyType.NONE
-        
-        if self.movement_start_time > 0:
-            time_since_movement_start = (current_time - self.movement_start_time) * 1000
-            if time_since_movement_start <= OVERLAP_BUFFER_MS:
-                return InaccuracyType.NONE
-        
-        if self.velocity_sim.is_accelerating:
-            return InaccuracyType.ACCELERATING
-        elif self.velocity_sim.is_decelerating():
-            return InaccuracyType.DECELERATING
-        else:
-            return InaccuracyType.CONSTANT
-
-
-class RingBuffer:
-    """Efficient ring buffer using numpy for O(1) append and fast iteration."""
-    
-    __slots__ = ('_buffer', '_head', '_size', '_capacity')
-    
-    def __init__(self, capacity: int, dtype=np.float32):
-        self._buffer = np.zeros(capacity, dtype=dtype)
-        self._head = 0
-        self._size = 0
-        self._capacity = capacity
-    
-    def append(self, value):
-        """Add value to buffer."""
-        self._buffer[self._head] = value
-        self._head = (self._head + 1) % self._capacity
-        if self._size < self._capacity:
-            self._size += 1
-    
-    def get_recent(self, count: Optional[int] = None) -> np.ndarray:
-        """Get most recent values in chronological order."""
-        if count is None:
-            count = self._size
-        else:
-            count = min(count, self._size)
-        
-        if count == 0:
-            return np.array([], dtype=self._buffer.dtype)
-        
-        start_idx = (self._head - count) % self._capacity
-        if start_idx < self._head:
-            return self._buffer[start_idx:self._head].copy()
-        else:
-            return np.concatenate([
-                self._buffer[start_idx:],
-                self._buffer[:self._head]
-            ])
-    
-    def clear(self):
-        """Clear the buffer."""
-        self._head = 0
-        self._size = 0
-    
-    def __len__(self):
-        return self._size
-
 
 class InputMonitor:
     """Main application for visualizing keyboard and mouse inputs with pattern practice."""
@@ -586,6 +198,10 @@ class InputMonitor:
         
         # Load available patterns
         self.available_patterns = self.pattern_manager.load_patterns()
+
+    def _is_window_focused(self) -> bool:
+        """Check if the pygame window is currently focused."""
+        return pygame.key.get_focused()
     
     def clear_inputs(self):
         self.a_key_held = False
@@ -593,6 +209,87 @@ class InputMonitor:
         self.shift_key_held = False
         self.ctrl_key_held = False
         self.prev_mouse_held = False        
+
+    def handle_pygame_events(self):
+        """Handle pygame events including text input."""
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                self.running = False
+            elif event.type == pygame.VIDEORESIZE:
+                self.handle_resize(event.w, event.h)
+            elif event.type == pygame.KEYDOWN:
+                if self.mode == AppMode.PATTERN_CREATE and self.name_input_active:
+                    if event.key == pygame.K_RETURN:
+                        if self.pattern_name and self.recorded_segments:
+                            pattern = Pattern(
+                                name=self.pattern_name,
+                                difficulty=self.pattern_difficulty,
+                                segments=self.recorded_segments,
+                                tolerance_ms=self.pattern_tolerance
+                            )
+                            if self.pattern_manager.save_pattern(pattern):
+                                self.add_toast(f"Pattern '{self.pattern_name}' saved!", GREEN)
+                                self.mode = AppMode.PATTERN_SELECT
+                                self.available_patterns = self.pattern_manager.load_patterns()
+                            else:
+                                self.add_toast("Failed to save pattern", RED)
+                            
+                            self.recording_pattern = False
+                            self.recorded_segments = []
+                            self.pattern_name = ""
+                            self.name_input_active = False
+                    elif event.key == pygame.K_BACKSPACE:
+                        self.pattern_name = self.pattern_name[:-1]
+                    elif event.key == pygame.K_ESCAPE:
+                        self.name_input_active = False
+                        self.pattern_name = ""
+                    elif event.unicode and event.unicode.isprintable():
+                        if len(self.pattern_name) < 30:
+                            self.pattern_name += event.unicode
+                
+                elif self.mode == AppMode.PATTERN_SELECT:
+                    if event.key == pygame.K_UP:
+                        self.selected_pattern_index = max(0, self.selected_pattern_index - 1)
+                    elif event.key == pygame.K_DOWN:
+                        self.selected_pattern_index = min(len(self.available_patterns) - 1, 
+                                                         self.selected_pattern_index + 1)
+                    elif event.key == pygame.K_DELETE:
+                        if self.available_patterns:
+                            pattern = self.available_patterns[self.selected_pattern_index]
+                            if self.pattern_manager.delete_pattern(pattern.name):
+                                self.add_toast(f"Deleted '{pattern.name}'", YELLOW)
+                                self.available_patterns = self.pattern_manager.load_patterns()
+                                self.selected_pattern_index = min(self.selected_pattern_index, 
+                                                                 len(self.available_patterns) - 1)
+    
+    def run(self):
+        """Main application loop."""
+        try:
+            while self.running:
+                self.handle_pygame_events()
+                self.update_data()
+                self.draw()
+                
+                if self.target_fps is not None:
+                    self.clock.tick(self.target_fps)
+                else:
+                    self.clock.tick()
+        finally:
+            self._cleanup()
+    
+    def _cleanup(self):
+        """Clean up resources on exit."""
+        if self.active_beeper:
+            try:
+                self.accel_beeper.stop()
+                self.constant_beeper.stop()
+                self.decel_beeper.stop()
+            except:
+                pass
+
+        keyboard.unhook_all()
+        pygame.quit()
+        sys.exit()        
     
     def update_fonts(self):
         """Scale fonts based on window height."""
@@ -638,7 +335,7 @@ class InputMonitor:
         keyboard.on_press_key(keys['pause'], lambda _: self._toggle_pause(), suppress=False)
         
         # Mode switching
-        keyboard.on_press_key('m', lambda _: self._switch_mode(), suppress=False)
+        keyboard.on_press_key(keys['practice_mode'], lambda _: self._switch_mode(), suppress=False)
         keyboard.on_press_key('space', lambda _: self._handle_space(), suppress=False)
         keyboard.on_press_key('r', lambda _: self._handle_r(), suppress=False)
         keyboard.on_press_key('esc', lambda _: self._handle_esc(), suppress=False)
@@ -719,22 +416,11 @@ class InputMonitor:
             if pause_duration_ms > 50:  # Minimum pause to record
                 pause_segment = PatternSegment(key='pause', duration_ms=pause_duration_ms)
                 self.recorded_segments.append(pause_segment)
-                # self.add_toast(f"PAUSE: {pause_duration_ms}ms", PURPLE, 1000)
         
         # Now record the actual segment
         if duration_ms > 20:  # Minimum segment duration
             segment = PatternSegment(key=key, duration_ms=duration_ms)
             self.recorded_segments.append(segment)
-            
-            key_colors = {
-                'a': BLUE,
-                'd': RED,
-                'click': WHITE,
-                'walk': CYAN,
-                'crouch': PURPLE
-            }
-            color = key_colors.get(key, GRAY)
-            # self.add_toast(f"{key.upper()}: {duration_ms}ms", color, 1500)
         
         # Update state
         self.current_segment_keys.discard(key)
@@ -751,6 +437,9 @@ class InputMonitor:
     
     def _switch_mode(self):
         """Cycle through application modes."""
+        if not self._is_window_focused():
+            return
+        
         if self.name_input_active:
             return
         
@@ -1430,10 +1119,6 @@ class InputMonitor:
                 name = self._get_cached_text(pattern.name, WHITE)
                 self.screen.blit(name, (box_x + 20, box_y + 15))
                 
-                # diff_color = GREEN if pattern.difficulty == "EASY" else (YELLOW if pattern.difficulty == "MEDIUM" else RED)
-                # difficulty = self._get_cached_text(f"Difficulty: {pattern.difficulty}", diff_color, 'small')
-                # self.screen.blit(difficulty, (box_x + 20, box_y + 50))
-                
                 segments_text = f"{len(pattern.segments)} segments, {pattern.get_total_duration_ms()}ms total, ±{pattern.tolerance_ms}ms tolerance"
                 segments = self._get_cached_text(segments_text, GRAY, 'small')
                 self.screen.blit(segments, (box_x + 20, box_y + 80))
@@ -1979,7 +1664,7 @@ class InputMonitor:
         
         keys = self.config['keys']
         help_x = self.window_width - self.get_scaled_value(400)
-        help_text = self._get_cached_text(f"M: Pattern Mode | {str(keys['pause']).upper()}: Pause", CENTER_LINE)
+        help_text = self._get_cached_text(f"{keys['practice_mode'].upper()}: Pattern Mode | {str(keys['pause']).upper()}: Pause", CENTER_LINE)
         self.screen.blit(help_text, (help_x, bottom_y))
     
     def _draw_monitor_screen(self):
@@ -1999,87 +1684,6 @@ class InputMonitor:
         self._draw_header()
         self._draw_status_bar()
     
-    def handle_pygame_events(self):
-        """Handle pygame events including text input."""
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                self.running = False
-            elif event.type == pygame.VIDEORESIZE:
-                self.handle_resize(event.w, event.h)
-            elif event.type == pygame.KEYDOWN:
-                if self.mode == AppMode.PATTERN_CREATE and self.name_input_active:
-                    if event.key == pygame.K_RETURN:
-                        if self.pattern_name and self.recorded_segments:
-                            pattern = Pattern(
-                                name=self.pattern_name,
-                                difficulty=self.pattern_difficulty,
-                                segments=self.recorded_segments,
-                                tolerance_ms=self.pattern_tolerance
-                            )
-                            if self.pattern_manager.save_pattern(pattern):
-                                self.add_toast(f"Pattern '{self.pattern_name}' saved!", GREEN)
-                                self.mode = AppMode.PATTERN_SELECT
-                                self.available_patterns = self.pattern_manager.load_patterns()
-                            else:
-                                self.add_toast("Failed to save pattern", RED)
-                            
-                            self.recording_pattern = False
-                            self.recorded_segments = []
-                            self.pattern_name = ""
-                            self.name_input_active = False
-                    elif event.key == pygame.K_BACKSPACE:
-                        self.pattern_name = self.pattern_name[:-1]
-                    elif event.key == pygame.K_ESCAPE:
-                        self.name_input_active = False
-                        self.pattern_name = ""
-                    elif event.unicode and event.unicode.isprintable():
-                        if len(self.pattern_name) < 30:
-                            self.pattern_name += event.unicode
-                
-                elif self.mode == AppMode.PATTERN_SELECT:
-                    if event.key == pygame.K_UP:
-                        self.selected_pattern_index = max(0, self.selected_pattern_index - 1)
-                    elif event.key == pygame.K_DOWN:
-                        self.selected_pattern_index = min(len(self.available_patterns) - 1, 
-                                                         self.selected_pattern_index + 1)
-                    elif event.key == pygame.K_DELETE:
-                        if self.available_patterns:
-                            pattern = self.available_patterns[self.selected_pattern_index]
-                            if self.pattern_manager.delete_pattern(pattern.name):
-                                self.add_toast(f"Deleted '{pattern.name}'", YELLOW)
-                                self.available_patterns = self.pattern_manager.load_patterns()
-                                self.selected_pattern_index = min(self.selected_pattern_index, 
-                                                                 len(self.available_patterns) - 1)
-    
-    def run(self):
-        """Main application loop."""
-        try:
-            while self.running:
-                self.handle_pygame_events()
-                self.update_data()
-                self.draw()
-                
-                if self.target_fps is not None:
-                    self.clock.tick(self.target_fps)
-                else:
-                    self.clock.tick()
-        finally:
-            self._cleanup()
-    
-    def _cleanup(self):
-        """Clean up resources on exit."""
-        if self.active_beeper:
-            try:
-                self.accel_beeper.stop()
-                self.constant_beeper.stop()
-                self.decel_beeper.stop()
-            except:
-                pass
-
-        keyboard.unhook_all()
-        pygame.quit()
-        sys.exit()
-
 
 if __name__ == "__main__":
     monitor = InputMonitor()
