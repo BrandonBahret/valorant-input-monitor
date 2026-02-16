@@ -66,26 +66,26 @@ DARK_CYAN = (40, 100, 120)
 DARK_PURPLE = (90, 50, 130)
 
 DEFAULT_CONFIG = {
-    "keys": {
-        "left": "a",
-        "right": "d",
-        "walk": "shift",
-        "crouch": "ctrl",
-        "pause": "tab"
-    },
-    "video": {
-        "enabled": True,
-        "vsync": True,
-        "target_fps": None
-    },
-    "audio": {
-        "volume": 1.0,
-        "sound_type": 1,
-        "loop_duration": 1000,
-        "accel_sound_type": 3,
-        "constant_sound_type": 4,
-        "decel_sound_type": 2
-    }
+  "keys": {
+    "left": "a",
+    "right": "d",
+    "walk": "shift",
+    "crouch": "ctrl",
+    "pause": "tab",
+  },
+  "video": {
+    "enabled": True,
+    "vsync": True,
+    "target_fps": None
+  },
+  "audio": {
+    "volume": 1.0,
+    "sound_type": 1,
+    "loop_duration": 500,
+    "accel_sound_type": 3,
+    "constant_sound_type": 4,
+    "decel_sound_type": 2
+  }
 }
 
 # Windows API

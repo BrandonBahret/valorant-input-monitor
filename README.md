@@ -53,11 +53,7 @@ If no config file is found, **built-in defaults are used automatically**.
     "right": "d",
     "walk": "shift",
     "crouch": "ctrl",
-    "pause": "tab",
-    "practice_mode": "p",
-    "start_pattern": "space",
-    "next_pattern": "right",
-    "prev_pattern": "left"
+    "pause": "tab"
   },
   "video": {
     "enabled": true,
