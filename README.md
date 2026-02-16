@@ -55,7 +55,8 @@ If no config file is found, **built-in defaults are used automatically**.
     "right": "d",
     "walk": "shift",
     "crouch": "ctrl",
-    "pause": "tab"
+    "pause": "tab",
+    "practice_mode": "m"
   },
   "video": {
     "enabled": true,
