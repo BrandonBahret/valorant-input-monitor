@@ -44,17 +44,22 @@ class PygameAudioPlayer:
     - No external audio file dependencies
     """
     
-    def __init__(self, sample_rate: int = 22050):
+    def __init__(self, sample_rate: int = 22050, channel_id: int = 0):
         """
         Initialize the audio player.
         
         Args:
             sample_rate: Audio sample rate in Hz (22050 is efficient for pygame)
+            channel_id: Pygame mixer channel to use (0-7 by default). Use different
+                       channel_ids for multiple independent audio players.
         """
-        # Initialize pygame mixer
+        # Initialize pygame mixer (safe to call multiple times)
         pygame.mixer.init(frequency=sample_rate, size=-16, channels=2, buffer=512)
                 
         self.sample_rate = sample_rate
+        
+        # Dedicated channel for this audio player
+        self.channel = pygame.mixer.Channel(channel_id)
         
         # Timing and state
         self.start_time = 0.0
@@ -563,6 +568,10 @@ class PygameAudioPlayer:
         """
         Play a sound effect.
         
+        The sound will always play for at least min_duration seconds to prevent audio clicks.
+        If the generated sound is shorter than min_duration, silence is added to reach
+        the minimum length.
+        
         Args:
             sound_type: Type of sound to play (from SoundType enum)
             volume: Volume level (0.0 to 1.0)
@@ -593,9 +602,28 @@ class PygameAudioPlayer:
                 # Default to alert for unimplemented types
                 sound = self._generate_alert()
             
-            # Set volume and play
+            # Enforce minimum duration by padding the sound if needed
+            sound_duration = sound.get_length()
+            if sound_duration < self.min_duration:
+                # Need to pad the sound with silence to meet minimum duration
+                padding_duration = self.min_duration - sound_duration
+                padding_samples = int(padding_duration * self.sample_rate)
+                
+                # Get the existing sound array
+                sound_array = pygame.sndarray.array(sound)
+                
+                # Create silence padding (stereo)
+                silence = np.zeros((padding_samples, 2), dtype=np.int16)
+                
+                # Concatenate sound with silence
+                extended_array = np.vstack((sound_array, silence))
+                
+                # Create new sound from extended array
+                sound = pygame.sndarray.make_sound(extended_array)
+            
+            # Set volume and play on dedicated channel
             sound.set_volume(min(max(volume, 0.0), 1.0))
-            sound.play()
+            self.channel.play(sound)
             
             self.is_playing = True
             self.start_time = time.time()
@@ -629,16 +657,16 @@ class PygameAudioPlayer:
             # Generate the loopable sound
             sound = self._generate_continuous_wave(sound_type, loop_duration)
             
-            # Set volume and start looping
+            # Set volume and start looping on dedicated channel
             sound.set_volume(min(max(volume, 0.0), 1.0))
-            sound.play(loops=-1)  # -1 means loop indefinitely
+            self.channel.play(sound, loops=-1)  # -1 means loop indefinitely
             
             self.is_continuous = True
             self.is_playing = True
             self.continuous_sound = sound
             self.start_time = time.time()
             self.last_sound_time = time.time()
-    
+            
     def stop(self):
         """
         Stop all currently playing sounds, including continuous loops.
@@ -647,20 +675,19 @@ class PygameAudioPlayer:
         hasn't elapsed, marks for pending stop which will execute when update() 
         is called after min_duration.
         """
-        if self.is_continuous:
-            elapsed = time.time() - self.start_time
+        if not self.is_playing:
+            return
             
-            if elapsed < self.min_duration:
-                self.pending_stop = True
-            else:
-                self._execute_stop()
+        elapsed = time.time() - self.start_time
+        
+        if elapsed < self.min_duration:
+            self.pending_stop = True
         else:
-            # For one-shot sounds, stop immediately
-            self._execute_stop()
+            self._execute_stop()            
     
     def _execute_stop(self):
         """Immediately stop playback and reset state."""
-        pygame.mixer.stop()
+        self.channel.stop()  # Only stop this player's channel
         self.is_playing = False
         self.is_continuous = False
         self.pending_stop = False
@@ -672,7 +699,7 @@ class PygameAudioPlayer:
         Process pending operations. Call this regularly from main thread.
         
         Handles:
-        - Updating playing state based on pygame mixer
+        - Updating playing state based on channel status
         - Deferred stops that were requested before minimum duration elapsed
         """
         # Handle pending stop
@@ -681,8 +708,8 @@ class PygameAudioPlayer:
             if elapsed >= self.min_duration:
                 self._execute_stop()
         
-        # Update playing state
-        if self.is_playing and not self.is_continuous and not pygame.mixer.get_busy():
+        # Update playing state based on channel activity
+        if self.is_playing and not self.is_continuous and not self.channel.get_busy():
             self.is_playing = False
     
     def set_min_duration(self, duration: float):
@@ -743,7 +770,21 @@ def demo():
         time.sleep(0.3)  # Pause between demos
     
     print("\n--- MINIMUM DURATION TEST ---")
-    print("Testing rapid start/stop with minimum duration protection...")
+    print("Testing minimum duration enforcement in play()...")
+    print("Playing SHOOTING sound (0.08s base duration, 0.15s min_duration)")
+    start = time.time()
+    player.play(SoundType.SHOOTING, volume=0.5)
+    
+    # Wait for sound to finish
+    while player.is_playing:
+        player.update()
+        time.sleep(0.01)
+    
+    elapsed = time.time() - start
+    print(f"Actual playback time: {elapsed:.3f}s (should be ~0.15s)")
+    
+    print("\n--- RAPID START/STOP TEST ---")
+    print("Testing rapid start/stop with continuous sound...")
     print("Starting run-and-gun alert, stopping immediately (min duration enforced)")
     player.start(SoundType.RUNNING_GUNNING, volume=0.4)
     time.sleep(0.05)  # Try to stop after only 50ms

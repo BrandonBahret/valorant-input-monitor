@@ -1,5 +1,6 @@
 __pycache__/
 env/
+patterns/
 input_monitor.build/
 input_monitor.dist/
 input_monitor.onefile-build/

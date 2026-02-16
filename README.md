@@ -53,17 +53,24 @@ If no config file is found, **built-in defaults are used automatically**.
     "right": "d",
     "walk": "shift",
     "crouch": "ctrl",
-    "pause": "tab"
+    "pause": "tab",
+    "practice_mode": "p",
+    "start_pattern": "space",
+    "next_pattern": "right",
+    "prev_pattern": "left"
   },
   "video": {
-    "enabled": true,  // Video Enabled: Run with window (true, false)
-    "vsync": true,    // VSync: Sync to monitor refresh rate (true, false)
-    "target_fps": 60  // Target FPS: Used when vsync is false (e.g., 30, 60, 144)
+    "enabled": true,
+    "vsync": true,
+    "target_fps": null
   },
   "audio": {
-    "volume": 1.0,        // Volume: Audio volume level (0.0 to 1.0)
-    "sound_type": 1,      // Sound Type: Audio feedback style (1, 2, 3, 4, 5, 6)
-    "loop_duration": 1000 // Loop Duration: Audio loop timing in milliseconds (e.g., 500, 1000, 1500)
+    "volume": 1.0,
+    "sound_type": 1,
+    "loop_duration": 500,
+    "accel_sound_type": 3,
+    "constant_sound_type": 4,
+    "decel_sound_type": 2
   }
 }
 ```
