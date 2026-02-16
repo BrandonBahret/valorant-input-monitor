@@ -4,6 +4,8 @@ A real-time input monitoring application that visualizes keyboard (A/D keys) and
 
 ![Preview image of the application](https://github.com/BrandonBahret/valorant-input-monitor/blob/main/input_monitor_graph.png "Preview")
 
+![Preview image of the application](https://github.com/BrandonBahret/valorant-input-monitor/blob/main/pattern_test_graph.png "Preview")
+
 ## Features
 
 - **A Key**: Blue line in upper half of chart

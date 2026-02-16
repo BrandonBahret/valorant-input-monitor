@@ -1430,9 +1430,9 @@ class InputMonitor:
                 name = self._get_cached_text(pattern.name, WHITE)
                 self.screen.blit(name, (box_x + 20, box_y + 15))
                 
-                diff_color = GREEN if pattern.difficulty == "EASY" else (YELLOW if pattern.difficulty == "MEDIUM" else RED)
-                difficulty = self._get_cached_text(f"Difficulty: {pattern.difficulty}", diff_color, 'small')
-                self.screen.blit(difficulty, (box_x + 20, box_y + 50))
+                # diff_color = GREEN if pattern.difficulty == "EASY" else (YELLOW if pattern.difficulty == "MEDIUM" else RED)
+                # difficulty = self._get_cached_text(f"Difficulty: {pattern.difficulty}", diff_color, 'small')
+                # self.screen.blit(difficulty, (box_x + 20, box_y + 50))
                 
                 segments_text = f"{len(pattern.segments)} segments, {pattern.get_total_duration_ms()}ms total, ±{pattern.tolerance_ms}ms tolerance"
                 segments = self._get_cached_text(segments_text, GRAY, 'small')
@@ -1500,7 +1500,7 @@ class InputMonitor:
             self.screen.blit(waiting, (waiting_x, y_pos))
         
         # Draw pattern timeline
-        chart_y = self.get_scaled_value(270)
+        chart_y = self.get_scaled_value(260)
         chart_height = self.get_scaled_value(380)
         self._draw_practice_timeline(chart_y, chart_height)
     
