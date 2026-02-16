@@ -1063,11 +1063,12 @@ class InputMonitor:
         
         # Instructions
         y_pos = self.get_scaled_value(100)
+        keys = self.config['keys']
         instructions = [
             ("UP/DOWN: Navigate patterns", CYAN),
             ("SPACE: Start practice", GREEN),
             ("R: Create new pattern", PURPLE),
-            ("M: Return to monitor", GRAY),
+            (f"{keys['practice_mode'].upper()}: Return to monitor", GRAY),
         ]
         
         for text, color in instructions:
