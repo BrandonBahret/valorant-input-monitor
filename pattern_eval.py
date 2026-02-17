@@ -2,52 +2,8 @@ import json
 from typing import Dict, List, Optional, Tuple
 from dataclasses import asdict, dataclass
 
+from pattern_eval_structs import Pattern
 from resource_helpers import resource_path
-
-
-
-@dataclass
-class PatternSegment:
-    """Represents a single segment in a pattern."""
-    key: str  # 'a', 'd', 'click', 'walk', 'crouch', 'pause'
-    duration_ms: int
-    
-    def to_dict(self):
-        return asdict(self)
-    
-    @classmethod
-    def from_dict(cls, data):
-        return cls(**data)
-
-
-@dataclass
-class Pattern:
-    """Represents a complete pattern for practice."""
-    name: str
-    difficulty: str  # "EASY", "MEDIUM", "HARD"
-    segments: List[PatternSegment]
-    tolerance_ms: int = 50
-    
-    def to_dict(self):
-        return {
-            'name': self.name,
-            'difficulty': self.difficulty,
-            'segments': [s.to_dict() for s in self.segments],
-            'tolerance_ms': self.tolerance_ms
-        }
-    
-    @classmethod
-    def from_dict(cls, data):
-        segments = [PatternSegment.from_dict(s) for s in data['segments']]
-        return cls(
-            name=data['name'],
-            difficulty=data['difficulty'],
-            segments=segments,
-            tolerance_ms=data.get('tolerance_ms', 50)
-        )
-    
-    def get_total_duration_ms(self) -> int:
-        return sum(s.duration_ms for s in self.segments)
 
 
 class PatternManager:
@@ -119,21 +75,30 @@ class PatternEvaluator:
         self.segment_key_pressed_time = 0.0
         self.segment_key_released_time = 0.0
         self.last_key_state = False
+        self.completed_once = False
         
         # State
         self.waiting_for_start = True
+        self.waiting_for_release = False  # Cooldown: all keys must be released before restarting
         self.completed = False
         self.disqualified = False
+        self.showing_result = False  # New: Indicates we are reviewing the results
         
         # Statistics
         self.attempts = 0
         self.successes = 0
         self.segment_timings: List[SegmentTiming] = []
-    
+
+    def _all_keys_released(self, a_held: bool, d_held: bool, click_held: bool,
+                           shift_held: bool, ctrl_held: bool) -> bool:
+        """Returns True when every tracked input is no longer held."""
+        return not any([a_held, d_held, click_held, shift_held, ctrl_held])
+
     def restart(self):
         """Reset for a new attempt."""
         self.completed = False
         self.disqualified = False
+        self.showing_result = False
         self.start_time = 0.0
         self.current_segment = 0
         self.segment_timings = []
@@ -141,7 +106,9 @@ class PatternEvaluator:
         self.segment_key_pressed_time = 0.0
         self.segment_key_released_time = 0.0
         self.last_key_state = False
-        self.waiting_for_start = True
+
+        self.waiting_for_release = True
+        self.waiting_for_start = False
     
     def get_segment_time_bounds(self, index: int) -> Tuple[float, float]:
         """
@@ -162,13 +129,6 @@ class PatternEvaluator:
     def is_input_valid_with_tolerance(self, input_key: str, current_time_seconds: float) -> bool:
         """
         Check if an input is valid considering tolerance window.
-        
-        Args:
-            input_key: The key being pressed
-            current_time_seconds: Current time in seconds
-            
-        Returns:
-            True if the input is valid (within tolerance of a segment that uses this key)
         """
         if self.waiting_for_start or self.start_time == 0:
             return False
@@ -208,14 +168,8 @@ class PatternEvaluator:
                                   shift_held: bool, ctrl_held: bool) -> bool:
         """
         Check if any inappropriate inputs are being pressed.
-        
-        Args:
-            current_time_seconds: Current time in seconds
-            
-        Returns:
-            True if an inappropriate input is detected
         """
-        if self.waiting_for_start or self.disqualified:
+        if self.waiting_for_start or self.disqualified or self.showing_result:
             return False
         
         # Map of input keys to their held states
@@ -237,6 +191,41 @@ class PatternEvaluator:
         
         return False
     
+    def is_start_key_pressed(self,
+                      a_held: bool, d_held: bool, click_held: bool,
+                      shift_held: bool, ctrl_held: bool) -> bool:
+        
+        first_segment = self.pattern.segments[0]
+        started = False
+        key_is_held = False
+        key_just_pressed = False
+        
+        if first_segment.key == 'a':
+            key_is_held = a_held
+            key_just_pressed = key_is_held and not self.last_key_state
+            started = key_just_pressed
+        elif first_segment.key == 'd':
+            key_is_held = d_held
+            key_just_pressed = key_is_held and not self.last_key_state
+            started = key_just_pressed
+        elif first_segment.key == 'click':
+            key_is_held = click_held
+            key_just_pressed = key_is_held and not self.last_key_state
+            started = key_just_pressed
+        elif first_segment.key == 'walk':
+            key_is_held = shift_held
+            key_just_pressed = key_is_held and not self.last_key_state
+            started = key_just_pressed
+        elif first_segment.key == 'crouch':
+            key_is_held = ctrl_held
+            key_just_pressed = key_is_held and not self.last_key_state
+            started = key_just_pressed
+        elif first_segment.key == 'pause':
+            started = True
+            key_is_held = False
+        
+        return started
+    
     def check_progress(self, current_time: float, current_real_time: float,
                       a_held: bool, d_held: bool, click_held: bool,
                       shift_held: bool, ctrl_held: bool) -> Optional[str]:
@@ -244,8 +233,23 @@ class PatternEvaluator:
         Check if user is following pattern correctly.
         Returns error message if disqualified, None otherwise.
         """
-        if self.disqualified:
+        # --- Cooldown gate ---------------------------------------------------
+        if self.waiting_for_release:
+            if self._all_keys_released(a_held, d_held, click_held, shift_held, ctrl_held):
+                print("[DEBUG] All keys released after disqualification — ready for next attempt.")
+                self.waiting_for_release = False
+                self.waiting_for_start = True
+                self.last_key_state = False 
+            else:
+                first_key = self.pattern.segments[0].key
+                if first_key == 'a': self.last_key_state = a_held
+                elif first_key == 'd': self.last_key_state = d_held
+                elif first_key == 'click': self.last_key_state = click_held
+                elif first_key == 'walk': self.last_key_state = shift_held
+                elif first_key == 'crouch': self.last_key_state = ctrl_held
+                else: self.last_key_state = False
             return None
+        # ---------------------------------------------------------------------
         
         # Wait for the user to start with the correct first input
         if self.waiting_for_start:
@@ -278,18 +282,16 @@ class PatternEvaluator:
                 started = True
                 key_is_held = False
             
+            if self.disqualified or self.showing_result and not started:
+                return None
+            
             # Update last key state even while waiting
             if not started:
-                if first_segment.key == 'a':
-                    self.last_key_state = a_held
-                elif first_segment.key == 'd':
-                    self.last_key_state = d_held
-                elif first_segment.key == 'click':
-                    self.last_key_state = click_held
-                elif first_segment.key == 'walk':
-                    self.last_key_state = shift_held
-                elif first_segment.key == 'crouch':
-                    self.last_key_state = ctrl_held
+                if first_segment.key == 'a': self.last_key_state = a_held
+                elif first_segment.key == 'd': self.last_key_state = d_held
+                elif first_segment.key == 'click': self.last_key_state = click_held
+                elif first_segment.key == 'walk': self.last_key_state = shift_held
+                elif first_segment.key == 'crouch': self.last_key_state = ctrl_held
             
             if started:
                 self.waiting_for_start = False
@@ -302,6 +304,7 @@ class PatternEvaluator:
                     self.segment_key_pressed_time = 0.0
                 self.segment_key_released_time = 0.0
                 self.last_key_state = key_is_held
+                
             return None
         
         # Check if pattern is completed
@@ -343,16 +346,11 @@ class PatternEvaluator:
         
         # Check if the correct key is currently being held
         key_is_held = False
-        if segment.key == 'a':
-            key_is_held = a_held
-        elif segment.key == 'd':
-            key_is_held = d_held
-        elif segment.key == 'click':
-            key_is_held = click_held
-        elif segment.key == 'walk':
-            key_is_held = shift_held
-        elif segment.key == 'crouch':
-            key_is_held = ctrl_held
+        if segment.key == 'a': key_is_held = a_held
+        elif segment.key == 'd': key_is_held = d_held
+        elif segment.key == 'click': key_is_held = click_held
+        elif segment.key == 'walk': key_is_held = shift_held
+        elif segment.key == 'crouch': key_is_held = ctrl_held
         
         # Track key press timestamp
         key_just_pressed = not self.last_key_state and key_is_held
@@ -360,11 +358,9 @@ class PatternEvaluator:
         
         if key_just_pressed:
             self.segment_key_pressed_time = current_real_time
-            print(f"[DEBUG] Key {segment.key} pressed at segment {self.current_segment}")
         
         if key_just_released:
             self.segment_key_released_time = current_real_time
-            print(f"[DEBUG] Key {segment.key} released at segment {self.current_segment}")
         
         self.last_key_state = key_is_held
         
@@ -442,7 +438,6 @@ class PatternEvaluator:
         avg_error = sum(timing_errors) / len(timing_errors) if timing_errors else 0
         
         print(f"Success: {success_count}/{total_segments} = {success_rate:.0f}%, Avg Error: {avg_error:.0f}ms")
-        print(f"Tolerance: ±{tolerance}ms")
         
         self.attempts += 1
         success = success_rate >= 80 and avg_error <= tolerance
@@ -454,6 +449,7 @@ class PatternEvaluator:
         if success:
             message = f"Success! {message}"
         
+        self.completed_once = True
         return {
             'success': success,
             'message': message,

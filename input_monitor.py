@@ -20,9 +20,12 @@ import numpy as np
 
 from audio_generator import PygameAudioPlayer, SoundType
 from datastructures import RingBuffer
-from pattern_eval import Pattern, PatternEvaluator, PatternManager, PatternSegment
+from pattern_eval import PatternEvaluator, PatternManager
 from app_config import *
+from pattern_eval_structs import Pattern, PatternSegment
 from velocity_simulator import InaccuracyType, ShootingTracker, VelocitySimulator
+
+from pattern_sonifier import PatternSonifier
 
 
 class AppMode(Enum):
@@ -135,6 +138,17 @@ class InputMonitor:
         self.velocity_sim = VelocitySimulator()
         self.shooting_tracker = ShootingTracker(self.velocity_sim)
         self.pattern_manager = PatternManager()
+
+        self.sonifier = PatternSonifier()
+        self.attempt_history: List = []   # List[List[SegmentTiming]], one per attempt
+
+        self.sonifier.register_hotkey(
+            get_pattern=lambda: (
+                self.pattern_evaluator.pattern
+                if self.pattern_evaluator is not None
+                else None
+            )
+        )
         
         # Data buffers
         self.time_points = RingBuffer(MAX_BUFFER_SIZE, dtype=np.float64)
@@ -201,14 +215,7 @@ class InputMonitor:
 
     def _is_window_focused(self) -> bool:
         """Check if the pygame window is currently focused."""
-        return pygame.key.get_focused()
-    
-    def clear_inputs(self):
-        self.a_key_held = False
-        self.d_key_held = False
-        self.shift_key_held = False
-        self.ctrl_key_held = False
-        self.prev_mouse_held = False        
+        return pygame.key.get_focused()     
 
     def handle_pygame_events(self):
         """Handle pygame events including text input."""
@@ -286,6 +293,8 @@ class InputMonitor:
                 self.decel_beeper.stop()
             except:
                 pass
+
+        self.sonifier.shutdown()
 
         keyboard.unhook_all()
         pygame.quit()
@@ -530,19 +539,24 @@ class InputMonitor:
             self.add_toast("No segments recorded", RED)
             self.recording_pattern = False
     
-    def _start_practice(self):
+    def _start_practice(self, show_toast: bool = True):
         """Start practicing the selected pattern."""
         if 0 <= self.selected_pattern_index < len(self.available_patterns):
             pattern = self.available_patterns[self.selected_pattern_index]
             self.pattern_evaluator = PatternEvaluator(pattern)
             self.mode = AppMode.PATTERN_PRACTICE
+            # [SONIFIER] clear history when switching to a new pattern so F5
+            # doesn't play a stale attempt from a different pattern.
+            self.attempt_history = []
             self.time_points.clear()
             self.a_points.clear()
             self.d_points.clear()
             self.shift_points.clear()
             self.ctrl_points.clear()
             self.click_points.clear()
-            self.add_toast(f"Practice: {pattern.name}", GREEN)
+            
+            if show_toast:
+                self.add_toast(f"Practice: {pattern.name}", GREEN)
     
     def _poll_mouse_state(self):
         """Check mouse button state using Windows API and handle state changes."""
@@ -566,15 +580,65 @@ class InputMonitor:
             self.active_beeper = None
         
         self.prev_mouse_held = current_mouse_held
-    
+
     def update_data(self):
         """Update simulation state and append data points."""
-        if self.paused and self.mode == AppMode.MONITOR:
-            return
-        
+        # 1. Always poll input devices first so we catch the start key
         self._poll_mouse_state()
         
         current_real_time = time.time()
+
+        # 2. Handle Monitor Mode Pause
+        if self.paused and self.mode == AppMode.MONITOR:
+            self.last_update = current_real_time
+            return
+
+        # 3. Handle Practice Mode "Waiting" (The Pause Logic) OR "Result Review"
+        if self.mode == AppMode.PATTERN_PRACTICE and self.pattern_evaluator:
+            # NEW: Handle Result Review (Pause to view graph)
+            if self.pattern_evaluator.showing_result:
+                self.last_update = current_real_time # Keep dt zero
+                
+                started = self.pattern_evaluator.is_start_key_pressed(
+                    self.a_key_held, self.d_key_held, self.shooting_tracker.mouse_held,
+                    self.shift_key_held, self.ctrl_key_held
+                )
+                
+                if started:
+                    self._start_practice(show_toast=False)
+                else:
+                    return # Stop updates so the graph freezes
+            
+            if self.pattern_evaluator.waiting_for_start:
+                # We must check if the user has pressed the key to start.
+                # We pass the current (frozen) time because time shouldn't advance yet.
+                self.pattern_evaluator.check_progress(
+                    self.current_time, current_real_time,
+                    self.a_key_held, self.d_key_held, self.shooting_tracker.mouse_held,
+                    self.shift_key_held, self.ctrl_key_held
+                )            
+                
+                # If we are STILL waiting after the check, THEN we pause the timeline.
+                if self.pattern_evaluator.waiting_for_start:
+                    self.last_update = current_real_time
+                    return
+                
+                # If we get here, the user just pressed the start key.
+                # We are transitioning from WAITING -> ACTIVE.
+                # Clear buffers now so the graph starts fresh.
+                print("[DEBUG] Starting new attempt - clearing buffers")
+                self.time_points.clear()
+                self.a_points.clear()
+                self.d_points.clear()
+                self.shift_points.clear()
+                self.ctrl_points.clear()
+                self.click_points.clear()
+                self.inaccuracy_type_points.clear()
+                self.velocity_points.clear()
+                self.bullet_fired_points.clear()
+
+        # 4. Advance Simulation Time
+        # (This is only reached if we are NOT paused/waiting)
         dt = current_real_time - self.last_update
         self.last_update = current_real_time
         self.current_time += dt
@@ -595,8 +659,9 @@ class InputMonitor:
                 self.beeper_queue.put(('start', inaccuracy_type))
                 self.active_beeper = inaccuracy_type
         
-        # Pattern practice checking
+        # 5. Pattern Practice Evaluation (Active/Running State)
         if self.mode == AppMode.PATTERN_PRACTICE and self.pattern_evaluator:
+            # We are running. Check progress against the newly advanced time.
             error_msg = self.pattern_evaluator.check_progress(
                 self.current_time, current_real_time,
                 self.a_key_held, self.d_key_held, self.shooting_tracker.mouse_held,
@@ -606,10 +671,15 @@ class InputMonitor:
             if error_msg:
                 self.error_player.play(SoundType.ERROR, self.volume)
                 self.add_toast(error_msg, RED, 1000)
-                self.clear_inputs()
-                self.pattern_evaluator.restart()
+                # This resets waiting_for_start=True, causing a pause on the NEXT frame
+                # self.pattern_evaluator.restart() 
+                self.pattern_evaluator.showing_result = True
+                self.pattern_evaluator.last_key_state = False
             elif self.pattern_evaluator.completed:
                 result = self.pattern_evaluator.evaluate_attempt()
+
+                self.attempt_history.append(list(self.pattern_evaluator.segment_timings))
+
                 if result['success']:
                     self.success_player.play(SoundType.SUCCESS, self.volume)
                     self.add_toast(result['message'], GREEN, 1000)
@@ -617,7 +687,10 @@ class InputMonitor:
                     self.error_player.play(SoundType.ERROR, self.volume)
                     color = YELLOW if result['success_rate'] >= 60 else RED
                     self.add_toast(result['message'], color, 1000)
-                self.pattern_evaluator.restart()
+                
+                # CHANGED: Do NOT restart immediately. Set state to showing result.
+                # This will cause the next update_data call to pause and keep the graph.
+                self.pattern_evaluator.showing_result = True
         
         self._process_beeper_queue()
         
@@ -631,6 +704,7 @@ class InputMonitor:
         self.inaccuracy_type_points.append(inaccuracy_type.value)
         self.velocity_points.append(velocity)
         self.bullet_fired_points.append(1 if inaccuracy_type != InaccuracyType.NONE else 0)
+    
     
     def _process_beeper_queue(self):
         """Process queued beeper commands."""
@@ -1155,25 +1229,15 @@ class InputMonitor:
             ("Pattern loops automatically", CYAN),
             (f"Tolerance: ±{pattern.tolerance_ms}ms", YELLOW),
             ("ESC: Exit practice", RED),
+            ("F5: Hear pattern", GREEN),   # [SONIFIER] hint
         ]
         
         for text, color in instructions:
             surf = self._get_cached_text(text, color, 'small')
             self.screen.blit(surf, (self.get_scaled_value(40), y_pos))
             y_pos += self.get_scaled_value(25)
-        
-        # Statistics
-        y_pos += self.get_scaled_value(15)
-        stats_text = f"Attempts: {self.pattern_evaluator.attempts}  |  Successes: {self.pattern_evaluator.successes}"
-        if self.pattern_evaluator.attempts > 0:
-            success_rate = (self.pattern_evaluator.successes / self.pattern_evaluator.attempts * 100)
-            stats_text += f"  |  Success Rate: {success_rate:.0f}%"
-        
-        stats = self._get_cached_text(stats_text, GRAY, 'small')
-        self.screen.blit(stats, (self.get_scaled_value(40), y_pos))
-        
-        # Show waiting status if not started
-        if self.pattern_evaluator.waiting_for_start:
+                    
+        if self.pattern_evaluator.waiting_for_start or self.pattern_evaluator.showing_result:
             y_pos -= self.get_scaled_value(80)
             first_segment = pattern.segments[0]
             if first_segment.key == 'pause':
@@ -1323,10 +1387,10 @@ class InputMonitor:
                             (progress_x, chart_y + chart_height), 3)
         
         # Draw user inputs overlay
-        if not self.pattern_evaluator.waiting_for_start:
+        if not self.pattern_evaluator.waiting_for_start or self.pattern_evaluator.completed_once:    
             self._draw_user_inputs_overlay(chart_y, chart_height, time_scale, 
-                                           a_baseline, d_baseline, click_baseline, 
-                                           walk_baseline, crouch_baseline, wave_height)
+                                            a_baseline, d_baseline, click_baseline, 
+                                            walk_baseline, crouch_baseline, wave_height)
     
     def _draw_user_inputs_overlay(self, chart_y: int, chart_height: int, time_scale: float,
                                   a_baseline: int, d_baseline: int, click_baseline: int,
@@ -1344,6 +1408,7 @@ class InputMonitor:
         
         time_offsets = (times - self.pattern_evaluator.start_time) * 1000
         x_coords = (time_offsets * time_scale).astype(np.int32)
+        
         
         valid_mask = (x_coords >= 0) & (x_coords < self.window_width)
         if not np.any(valid_mask):
